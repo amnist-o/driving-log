@@ -22,7 +22,6 @@
 
 // ===== CONFIGURATION =====
 const SHEET_GID = 353772877; // Your sheet tab's gid
-const GEMINI_MODEL = 'gemini-2.0-flash';
 
 /**
  * Handle GET requests (just a health check)
@@ -44,6 +43,8 @@ function doPost(e) {
       return handleExtract(data);
     } else if (data.action === 'submit') {
       return handleSubmit(data);
+    } else if (data.action === 'lastDestination') {
+      return handleLastDestination();
     } else {
       return jsonResponse({ error: 'Unknown action: ' + data.action });
     }
@@ -166,6 +167,29 @@ function handleSubmit(data) {
   sheet.appendRow(row);
 
   return jsonResponse({ status: 'ok', row: row });
+}
+
+/**
+ * Get the Destination value from the last non-empty row
+ * (used to auto-fill the "From" field on the next trip)
+ */
+function handleLastDestination() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = getSheetByGid(ss, SHEET_GID);
+
+  if (!sheet) {
+    return jsonResponse({ lastDestination: '' });
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) {
+    // Only header row exists
+    return jsonResponse({ lastDestination: '' });
+  }
+
+  // Destination is column G (column 7)
+  const destination = sheet.getRange(lastRow, 7).getValue();
+  return jsonResponse({ lastDestination: destination || '' });
 }
 
 /**

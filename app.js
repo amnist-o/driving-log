@@ -14,6 +14,7 @@ const CONFIG = {
 let currentScreen = 0;
 let imageBase64 = null;
 let imageMimeType = null;
+let cachedLastDestination = ''; // Auto-fill "From" with previous trip's destination
 
 // ===== DOM REFS =====
 const $ = (sel) => document.querySelector(sel);
@@ -56,6 +57,9 @@ extractBtn.addEventListener('click', handleExtract);
 backBtn.addEventListener('click', () => goToScreen(0));
 submitBtn.addEventListener('click', handleSubmit);
 newTripBtn.addEventListener('click', handleNewTrip);
+
+// Fetch the last destination on page load (for auto-filling "From")
+fetchLastDestination();
 
 // ===== IMAGE HANDLING =====
 
@@ -218,11 +222,38 @@ async function handleExtract() {
     fields.tripDate.value = formatDate(now);
     fields.arrivalTime.value = formatTime(now);
 
+    // Auto-fill "From" with the last trip's destination
+    if (cachedLastDestination) {
+      fields.tripFrom.value = cachedLastDestination;
+    }
+
     goToScreen(1);
   } catch (err) {
     showToast('Extraction failed: ' + err.message, 'error');
   } finally {
     setButtonLoading(extractBtn, extractSpinner, false);
+  }
+}
+
+// ===== FETCH LAST DESTINATION =====
+async function fetchLastDestination() {
+  if (!CONFIG.SCRIPT_URL) return;
+
+  try {
+    const response = await fetch(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'lastDestination' })
+    });
+
+    if (!response.ok) return;
+
+    const result = await response.json();
+    if (result.lastDestination) {
+      cachedLastDestination = result.lastDestination;
+    }
+  } catch {
+    // Silent fail — this is just a convenience feature
   }
 }
 
@@ -273,6 +304,11 @@ async function handleSubmit() {
       ${payload.from ? `📍 ${payload.from} → ${payload.destination}` : ''}
       ${payload.purpose ? `<br>📝 ${payload.purpose}` : ''}
     `;
+
+    // Update cached destination for the next trip
+    if (payload.destination) {
+      cachedLastDestination = payload.destination;
+    }
 
     goToScreen(2);
   } catch (err) {
