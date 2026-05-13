@@ -62,7 +62,9 @@ function handleExtract(data) {
   }
 
   // Try models in order — fallback if quota exceeded
-  const models = ['gemini-2.0-flash', 'gemini-2.5-flash'];
+  // gemini-2.5-flash-lite: stable, cheapest, clean JSON output
+  // gemini-3.1-flash-lite: newest generation fallback
+  const models = ['gemini-2.5-flash-lite', 'gemini-3.1-flash-lite'];
 
   for (let m = 0; m < models.length; m++) {
     const model = models[m];
