@@ -61,59 +61,72 @@ function handleExtract(data) {
     return jsonResponse({ error: 'GEMINI_API_KEY not set in Script Properties' });
   }
 
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/'
-    + GEMINI_MODEL + ':generateContent?key=' + apiKey;
+  // Try models in order — fallback if quota exceeded
+  const models = ['gemini-2.0-flash', 'gemini-2.5-flash'];
 
-  const payload = {
-    contents: [{
-      parts: [
-        {
-          text: 'Extract these values from the car dashboard display image:\n'
-            + '- fuel_economy (the "This Drive" value in km/L, as a float)\n'
-            + '- distance (Driving Distance in km, as a float)\n'
-            + '- duration (Driving Time in minutes, as an integer)\n\n'
-            + 'Return ONLY valid JSON, no markdown, no explanation:\n'
-            + '{"fuel_economy": <number>, "distance": <number>, "duration": <number>}'
-        },
-        {
-          inline_data: {
-            mime_type: data.mimeType || 'image/jpeg',
-            data: data.image
+  for (let m = 0; m < models.length; m++) {
+    const model = models[m];
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/'
+      + model + ':generateContent?key=' + apiKey;
+
+    const payload = {
+      contents: [{
+        parts: [
+          {
+            text: 'Extract these values from the car dashboard display image:\n'
+              + '- fuel_economy (the "This Drive" value in km/L, as a float)\n'
+              + '- distance (Driving Distance in km, as a float)\n'
+              + '- duration (Driving Time in minutes, as an integer)\n\n'
+              + 'Return ONLY valid JSON, no markdown, no explanation:\n'
+              + '{"fuel_economy": <number>, "distance": <number>, "duration": <number>}'
+          },
+          {
+            inline_data: {
+              mime_type: data.mimeType || 'image/jpeg',
+              data: data.image
+            }
           }
-        }
-      ]
-    }],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 100
+        ]
+      }],
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens: 100
+      }
+    };
+
+    const options = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    const response = UrlFetchApp.fetch(url, options);
+    const result = JSON.parse(response.getContentText());
+
+    if (result.error) {
+      // If quota exceeded and we have more models to try, continue
+      if (result.error.message && result.error.message.indexOf('quota') !== -1 && m < models.length - 1) {
+        Utilities.sleep(2000); // Brief pause before trying next model
+        continue;
+      }
+      return jsonResponse({ error: result.error.message });
     }
-  };
 
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
+    // Parse Gemini's response
+    const text = result.candidates[0].content.parts[0].text;
 
-  const response = UrlFetchApp.fetch(url, options);
-  const result = JSON.parse(response.getContentText());
+    // Extract JSON from response (handle possible markdown wrapping)
+    const jsonMatch = text.match(/\{[^}]+\}/);
+    if (!jsonMatch) {
+      return jsonResponse({ error: 'Could not parse AI response: ' + text });
+    }
 
-  if (result.error) {
-    return jsonResponse({ error: result.error.message });
+    const extracted = JSON.parse(jsonMatch[0]);
+    return jsonResponse(extracted);
   }
 
-  // Parse Gemini's response
-  const text = result.candidates[0].content.parts[0].text;
-
-  // Extract JSON from response (handle possible markdown wrapping)
-  const jsonMatch = text.match(/\{[^}]+\}/);
-  if (!jsonMatch) {
-    return jsonResponse({ error: 'Could not parse AI response: ' + text });
-  }
-
-  const extracted = JSON.parse(jsonMatch[0]);
-  return jsonResponse(extracted);
+  return jsonResponse({ error: 'All models failed — quota may be exhausted. Please try again later.' });
 }
 
 /**
