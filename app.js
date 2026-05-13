@@ -58,40 +58,85 @@ submitBtn.addEventListener('click', handleSubmit);
 newTripBtn.addEventListener('click', handleNewTrip);
 
 // ===== IMAGE HANDLING =====
+
+/**
+ * Detect real MIME type from file header bytes (magic numbers).
+ * Handles JPEG, PNG, HEIC/HEIF, and WebP.
+ */
+function detectMimeType(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer.slice(0, 12));
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return 'image/jpeg';
+  // PNG: 89 50 4E 47
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) return 'image/png';
+  // WebP: RIFF....WEBP
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
+  // HEIC/HEIF: check for ftyp box containing 'heic', 'heix', 'mif1'
+  const ftypStr = String.fromCharCode(...bytes.slice(4, 12));
+  if (ftypStr.startsWith('ftyp')) {
+    const brand = ftypStr.slice(4);
+    if (brand.startsWith('heic') || brand.startsWith('heix') || brand.startsWith('mif1')) return 'image/heic';
+  }
+  return null; // Unknown
+}
+
+/**
+ * Convert ArrayBuffer to base64 string
+ */
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 function handleImageSelect(e) {
   const file = e.target.files[0];
   if (!file) return;
 
+  // Use blob URL for preview — works for HEIC on iOS Safari natively
+  const blobUrl = URL.createObjectURL(file);
+  previewImage.src = blobUrl;
+  previewImage.classList.remove('hidden');
+  previewPlaceholder.classList.add('hidden');
+  clearImageBtn.classList.remove('hidden');
+  previewZone.classList.add('has-image');
+
+  // Read as ArrayBuffer for MIME detection + base64 encoding
   const reader = new FileReader();
   reader.onload = async (evt) => {
-    const dataUrl = evt.target.result;
+    const arrayBuffer = evt.target.result;
 
-    // Show preview immediately
-    previewImage.src = dataUrl;
-    previewImage.classList.remove('hidden');
-    previewPlaceholder.classList.add('hidden');
-    clearImageBtn.classList.remove('hidden');
-    previewZone.classList.add('has-image');
+    // Detect real MIME type from file bytes (don't trust file.type)
+    const detectedMime = detectMimeType(arrayBuffer) || file.type || 'image/jpeg';
 
-    // Compress in background
+    // Try to compress via canvas (JPEG output, smaller payload)
     try {
-      const result = await compressImage(dataUrl);
+      const result = await compressImage(blobUrl);
       imageBase64 = result.base64;
-      imageMimeType = result.mimeType;
+      imageMimeType = 'image/jpeg';
     } catch {
-      // Fallback: use raw base64
-      const parts = dataUrl.split(',');
-      const mime = parts[0].match(/:(.*?);/);
-      imageBase64 = parts[1];
-      imageMimeType = mime ? mime[1] : 'image/jpeg';
+      // Canvas can't decode this format (HEIC on Chrome/Android)
+      // Send raw bytes — Gemini API supports HEIC natively
+      imageBase64 = arrayBufferToBase64(arrayBuffer);
+      imageMimeType = detectedMime;
     }
 
     extractBtn.disabled = false;
   };
-  reader.readAsDataURL(file);
+  reader.readAsArrayBuffer(file);
 }
 
-function compressImage(dataUrl) {
+/**
+ * Compress image via canvas → JPEG.
+ * Works for JPEG, PNG, WebP on all browsers.
+ * Works for HEIC on iOS Safari (native HEIC decoding).
+ * Throws on browsers that can't decode the source format.
+ */
+function compressImage(blobUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -113,12 +158,16 @@ function compressImage(dataUrl) {
         reject(err);
       }
     };
-    img.onerror = reject;
-    img.src = dataUrl;
+    img.onerror = () => reject(new Error('Image decode failed'));
+    img.src = blobUrl;
   });
 }
 
 function clearImage() {
+  // Revoke blob URL to free memory
+  if (previewImage.src && previewImage.src.startsWith('blob:')) {
+    URL.revokeObjectURL(previewImage.src);
+  }
   imageBase64 = null;
   imageMimeType = null;
   previewImage.src = '';
