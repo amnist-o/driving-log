@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="Log your driving trips by snapping a photo of your dashboard. AI extracts the data automatically.">
+  <meta name="theme-color" content="#0a0a1a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Drive Log</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Background glow effects -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="logo">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      <span>Drive Log</span>
+    </div>
+    <!-- Step Indicator -->
+    <div class="steps" id="stepIndicator">
+      <div class="step active" data-step="0">
+        <div class="step-dot">1</div>
+        <span>Capture</span>
+      </div>
+      <div class="step-line"></div>
+      <div class="step" data-step="1">
+        <div class="step-dot">2</div>
+        <span>Review</span>
+      </div>
+      <div class="step-line"></div>
+      <div class="step" data-step="2">
+        <div class="step-dot">3</div>
+        <span>Done</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Screen Container -->
+  <main class="screen-container">
+
+    <!-- Screen 1: Capture -->
+    <section class="screen screen-capture active" id="screenCapture">
+      <div class="card glass-card">
+        <div class="card-header">
+          <h1>Snap Your Dashboard</h1>
+          <p class="subtitle">Take a photo of the Drive Results screen</p>
+        </div>
+
+        <!-- Image Preview -->
+        <div class="preview-zone" id="previewZone">
+          <div class="preview-placeholder" id="previewPlaceholder">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+            <span>No image yet</span>
+          </div>
+          <img id="previewImage" class="preview-image hidden" alt="Dashboard preview">
+          <button class="btn-clear hidden" id="clearImageBtn" aria-label="Clear image">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Capture Buttons -->
+        <div class="capture-actions">
+          <label class="btn btn-primary" id="cameraBtnLabel">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+              <circle cx="12" cy="13" r="4"/>
+            </svg>
+            <span>Take Photo</span>
+            <input type="file" accept="image/*" capture="environment" id="cameraInput" class="sr-only">
+          </label>
+          <label class="btn btn-secondary" id="uploadBtnLabel">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>Upload</span>
+            <input type="file" accept="image/*" id="uploadInput" class="sr-only">
+          </label>
+        </div>
+
+        <!-- Extract Button -->
+        <button class="btn btn-accent btn-full" id="extractBtn" disabled>
+          <span class="btn-text">Extract Data</span>
+          <svg class="btn-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+          </svg>
+          <div class="spinner hidden" id="extractSpinner"></div>
+        </button>
+      </div>
+    </section>
+
+    <!-- Screen 2: Form -->
+    <section class="screen screen-form" id="screenForm">
+      <div class="card glass-card">
+        <div class="card-header">
+          <h1>Trip Details</h1>
+          <p class="subtitle">Verify extracted data & fill in trip info</p>
+        </div>
+
+        <!-- Extracted Data Section -->
+        <div class="form-section">
+          <div class="section-label">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+            </svg>
+            <span>Extracted from Dashboard</span>
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="fuelEconomy">Fuel Economy</label>
+              <div class="input-wrapper">
+                <input type="number" step="0.1" id="fuelEconomy" placeholder="0.0">
+                <span class="input-unit">km/L</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="distance">Distance</label>
+              <div class="input-wrapper">
+                <input type="number" step="0.1" id="distance" placeholder="0.0">
+                <span class="input-unit">km</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="duration">Duration</label>
+              <div class="input-wrapper">
+                <input type="number" step="1" id="duration" placeholder="0">
+                <span class="input-unit">min</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Auto-filled Section -->
+        <div class="form-section">
+          <div class="section-label">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+            </svg>
+            <span>Auto-filled</span>
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="tripDate">Date</label>
+              <div class="input-wrapper">
+                <input type="date" id="tripDate">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="arrivalTime">Arrival Time</label>
+              <div class="input-wrapper">
+                <input type="time" id="arrivalTime">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Manual Section -->
+        <div class="form-section">
+          <div class="section-label">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+            </svg>
+            <span>Your Input</span>
+          </div>
+          <div class="form-stack">
+            <div class="form-group">
+              <label for="tripFrom">From</label>
+              <input type="text" id="tripFrom" placeholder="Starting location">
+            </div>
+            <div class="form-group">
+              <label for="tripDestination">Destination</label>
+              <input type="text" id="tripDestination" placeholder="Where did you go?">
+            </div>
+            <div class="form-group">
+              <label for="tripPurpose">Purpose</label>
+              <input type="text" id="tripPurpose" placeholder="e.g., Work, Errands, Leisure">
+            </div>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="form-actions">
+          <button class="btn btn-ghost" id="backBtn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+            </svg>
+            Back
+          </button>
+          <button class="btn btn-accent btn-submit" id="submitBtn">
+            <span class="btn-text">Submit</span>
+            <svg class="btn-check" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            <div class="spinner hidden" id="submitSpinner"></div>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Screen 3: Success -->
+    <section class="screen screen-success" id="screenSuccess">
+      <div class="card glass-card success-card">
+        <div class="success-icon-container">
+          <div class="success-ring"></div>
+          <svg class="success-check" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </div>
+        <h1>Trip Logged!</h1>
+        <p class="subtitle">Your driving data has been saved to the spreadsheet.</p>
+        <div class="success-summary" id="successSummary"></div>
+        <button class="btn btn-primary btn-full" id="newTripBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          <span>Log Another Trip</span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Toast notification -->
+  <div class="toast hidden" id="toast">
+    <span id="toastMessage"></span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
