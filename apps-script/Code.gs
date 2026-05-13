@@ -142,14 +142,18 @@ function handleSubmit(data) {
     return jsonResponse({ error: 'Sheet with gid ' + SHEET_GID + ' not found' });
   }
 
-  // Format date from YYYY-MM-DD to the sheet's expected format
+  // Create a proper Date object so Sheets recognizes it as a date (not text)
   const dateParts = data.date.split('-');
-  const formattedDate = dateParts[2] + '/' + dateParts[1] + '/' + dateParts[0]; // DD/MM/YYYY
+  const dateObj = new Date(
+    parseInt(dateParts[0]),      // year
+    parseInt(dateParts[1]) - 1,  // month (0-indexed)
+    parseInt(dateParts[2])       // day
+  );
 
   // Build the row: Date, Arrival Time, Fuel Economy, Distance, Duration, From, Destination, Purpose
   // (Fuel Consumption is column 9 — a formula, so we leave it alone)
   const row = [
-    formattedDate,
+    dateObj,
     data.arrivalTime,
     data.fuelEconomy,
     data.distance,
