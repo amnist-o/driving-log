@@ -15,6 +15,8 @@ let currentScreen = 0;
 let imageBase64 = null;
 let imageMimeType = null;
 let cachedLastDestination = ''; // Auto-fill "From" with previous trip's destination
+let exifDateTime = null; // EXIF DateTimeOriginal from the photo
+let currentBlobUrl = null; // Track blob URL for the current image
 
 // ===== DOM REFS =====
 const $ = (sel) => document.querySelector(sel);
@@ -36,6 +38,20 @@ const backBtn = $('#backBtn');
 const newTripBtn = $('#newTripBtn');
 const toast = $('#toast');
 const toastMessage = $('#toastMessage');
+const skipBtn = $('#skipBtn');
+
+// Photo preview on review screen
+const photoPreviewBar = $('#photoPreviewBar');
+const photoPreviewExpanded = $('#photoPreviewExpanded');
+const reviewThumbnail = $('#reviewThumbnail');
+const reviewFullImage = $('#reviewFullImage');
+
+// Sync badge & pending panel
+const syncBadge = $('#syncBadge');
+const syncCount = $('#syncCount');
+const pendingPanel = $('#pendingPanel');
+const pendingPanelList = $('#pendingPanelList');
+const closePanelBtn = $('#closePanelBtn');
 
 // Form fields
 const fields = {
@@ -58,8 +74,189 @@ backBtn.addEventListener('click', () => goToScreen(0));
 submitBtn.addEventListener('click', handleSubmit);
 newTripBtn.addEventListener('click', handleNewTrip);
 
-// Fetch the last destination on page load (for auto-filling "From")
+// Skip — Enter Manually
+skipBtn.addEventListener('click', () => {
+  const timeSource = exifDateTime || new Date();
+  fields.tripDate.value = formatDate(timeSource);
+  fields.arrivalTime.value = formatTime(timeSource);
+  if (cachedLastDestination) {
+    fields.tripFrom.value = cachedLastDestination;
+  }
+  // Set photo preview on review screen
+  if (currentBlobUrl) {
+    reviewThumbnail.src = currentBlobUrl;
+    reviewFullImage.src = currentBlobUrl;
+    photoPreviewBar.style.display = '';
+  } else {
+    photoPreviewBar.style.display = 'none';
+  }
+  clearConfidenceBadges();
+  goToScreen(1);
+});
+
+// Photo preview toggle
+photoPreviewBar.addEventListener('click', () => {
+  const isExpanded = photoPreviewBar.classList.contains('expanded');
+  if (isExpanded) {
+    photoPreviewBar.classList.remove('expanded');
+    photoPreviewExpanded.classList.add('hidden');
+  } else {
+    photoPreviewBar.classList.add('expanded');
+    photoPreviewExpanded.classList.remove('hidden');
+  }
+});
+
+// Sync badge → toggle pending panel
+syncBadge.addEventListener('click', () => {
+  const isVisible = !pendingPanel.classList.contains('hidden');
+  if (isVisible) {
+    pendingPanel.classList.add('hidden');
+  } else {
+    renderPendingPanel();
+    pendingPanel.classList.remove('hidden');
+  }
+});
+
+closePanelBtn.addEventListener('click', () => {
+  pendingPanel.classList.add('hidden');
+});
+
+// Auto-sync when coming back online
+window.addEventListener('online', syncPendingTrips);
+
+// ===== INITIALIZATION =====
+// Load cached lastDestination immediately (works offline)
+const cachedDest = localStorage.getItem('lastDestination');
+if (cachedDest) {
+  cachedLastDestination = cachedDest;
+}
+// Then fetch from server to update cache
 fetchLastDestination();
+
+// Show sync badge if pending trips exist
+updateSyncBadge();
+
+// Try syncing on load if online
+if (navigator.onLine) {
+  syncPendingTrips();
+}
+
+// ===== EXIF EXTRACTION =====
+
+/**
+ * Extract DateTimeOriginal from JPEG EXIF data.
+ * Parses the TIFF header, IFD0, finds ExifIFD pointer, then reads tag 0x9003.
+ * Returns a Date object or null.
+ */
+function extractExifDateTime(arrayBuffer) {
+  try {
+    const view = new DataView(arrayBuffer);
+
+    // Check JPEG SOI marker
+    if (view.getUint16(0) !== 0xFFD8) return null;
+
+    let offset = 2;
+    while (offset < view.byteLength - 4) {
+      const marker = view.getUint16(offset);
+      offset += 2;
+
+      // APP1 marker (EXIF)
+      if (marker === 0xFFE1) {
+        const segLen = view.getUint16(offset);
+        // Check "Exif\0\0" header
+        const exifHeader = view.getUint32(offset + 2);
+        if (exifHeader !== 0x45786966) return null; // "Exif"
+
+        const tiffOffset = offset + 8; // Start of TIFF header
+        const byteOrder = view.getUint16(tiffOffset);
+        const littleEndian = byteOrder === 0x4949; // "II"
+
+        // Verify TIFF magic number
+        if (view.getUint16(tiffOffset + 2, littleEndian) !== 0x002A) return null;
+
+        // Get offset to IFD0
+        const ifd0Offset = view.getUint32(tiffOffset + 4, littleEndian);
+
+        // Read IFD0 to find ExifIFD pointer (tag 0x8769)
+        const exifIfdPointer = findTagInIFD(view, tiffOffset, tiffOffset + ifd0Offset, littleEndian, 0x8769);
+        if (exifIfdPointer === null) return null;
+
+        // Read ExifIFD to find DateTimeOriginal (tag 0x9003)
+        const dateTimeValue = findTagInIFD(view, tiffOffset, tiffOffset + exifIfdPointer, littleEndian, 0x9003, true);
+        if (!dateTimeValue) return null;
+
+        // Parse "YYYY:MM:DD HH:MM:SS"
+        return parseExifDateString(dateTimeValue);
+      }
+
+      // Skip other segments
+      if ((marker & 0xFF00) === 0xFF00) {
+        const len = view.getUint16(offset);
+        offset += len;
+      } else {
+        break;
+      }
+    }
+  } catch {
+    // EXIF parsing failed — not critical
+  }
+  return null;
+}
+
+/**
+ * Find a tag value in an IFD.
+ * If asString is true, reads the value as an ASCII string.
+ */
+function findTagInIFD(view, tiffStart, ifdStart, littleEndian, targetTag, asString = false) {
+  try {
+    const entryCount = view.getUint16(ifdStart, littleEndian);
+    for (let i = 0; i < entryCount; i++) {
+      const entryOffset = ifdStart + 2 + (i * 12);
+      const tag = view.getUint16(entryOffset, littleEndian);
+
+      if (tag === targetTag) {
+        const type = view.getUint16(entryOffset + 2, littleEndian);
+        const count = view.getUint32(entryOffset + 4, littleEndian);
+        const valueOffset = entryOffset + 8;
+
+        if (asString) {
+          // String values > 4 bytes are stored at an offset
+          const strOffset = count > 4
+            ? tiffStart + view.getUint32(valueOffset, littleEndian)
+            : valueOffset;
+          let str = '';
+          for (let j = 0; j < count - 1; j++) { // -1 to skip null terminator
+            str += String.fromCharCode(view.getUint8(strOffset + j));
+          }
+          return str;
+        }
+
+        // Return the 4-byte value as uint32 (for IFD pointers)
+        return view.getUint32(valueOffset, littleEndian);
+      }
+    }
+  } catch {
+    // Tag not found or read error
+  }
+  return null;
+}
+
+/**
+ * Parse EXIF date string "YYYY:MM:DD HH:MM:SS" to a Date object.
+ */
+function parseExifDateString(str) {
+  // Format: "2024:03:15 14:30:45"
+  const match = str.match(/^(\d{4}):(\d{2}):(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  return new Date(
+    parseInt(match[1]),
+    parseInt(match[2]) - 1,
+    parseInt(match[3]),
+    parseInt(match[4]),
+    parseInt(match[5]),
+    parseInt(match[6])
+  );
+}
 
 // ===== IMAGE HANDLING =====
 
@@ -103,19 +300,31 @@ function handleImageSelect(e) {
 
   // Use blob URL for preview — works for HEIC on iOS Safari natively
   const blobUrl = URL.createObjectURL(file);
+  currentBlobUrl = blobUrl;
   previewImage.src = blobUrl;
   previewImage.classList.remove('hidden');
   previewPlaceholder.classList.add('hidden');
   clearImageBtn.classList.remove('hidden');
   previewZone.classList.add('has-image');
 
-  // Read as ArrayBuffer for MIME detection + base64 encoding
+  // Read as ArrayBuffer for MIME detection + base64 encoding + EXIF
   const reader = new FileReader();
   reader.onload = async (evt) => {
     const arrayBuffer = evt.target.result;
 
     // Detect real MIME type from file bytes (don't trust file.type)
     const detectedMime = detectMimeType(arrayBuffer) || file.type || 'image/jpeg';
+
+    // Extract EXIF DateTimeOriginal (JPEG only; HEIC falls back to file.lastModified)
+    exifDateTime = extractExifDateTime(arrayBuffer);
+    if (!exifDateTime && file.lastModified) {
+      // Use file's lastModified as a fallback (OS-level timestamp)
+      const lm = new Date(file.lastModified);
+      // Only use if the file is older than 60 seconds (i.e., not just taken)
+      if (Date.now() - lm.getTime() > 60000) {
+        exifDateTime = lm;
+      }
+    }
 
     // Try to compress via canvas (JPEG output, smaller payload)
     try {
@@ -169,11 +378,13 @@ function compressImage(blobUrl) {
 
 function clearImage() {
   // Revoke blob URL to free memory
-  if (previewImage.src && previewImage.src.startsWith('blob:')) {
-    URL.revokeObjectURL(previewImage.src);
+  if (currentBlobUrl) {
+    URL.revokeObjectURL(currentBlobUrl);
+    currentBlobUrl = null;
   }
   imageBase64 = null;
   imageMimeType = null;
+  exifDateTime = null;
   previewImage.src = '';
   previewImage.classList.add('hidden');
   previewPlaceholder.classList.remove('hidden');
@@ -184,18 +395,110 @@ function clearImage() {
   uploadInput.value = '';
 }
 
+// ===== CONFIDENCE BADGES =====
+
+function applyConfidence(badgeId, score) {
+  const badge = $(`#${badgeId}`);
+  if (!badge) return;
+
+  const wrapper = badge.closest('.input-wrapper');
+  // Remove previous states
+  wrapper.classList.remove('confidence-low', 'confidence-high');
+  badge.classList.remove('high', 'low', 'visible');
+
+  if (score == null) return;
+
+  const isHigh = score >= 0.8;
+  badge.textContent = isHigh ? '✓' : '⚠ verify';
+  badge.classList.add(isHigh ? 'high' : 'low', 'visible');
+  wrapper.classList.add(isHigh ? 'confidence-high' : 'confidence-low');
+}
+
+function clearConfidenceBadges() {
+  ['confFuelEconomy', 'confDistance', 'confDuration'].forEach(id => {
+    const badge = $(`#${id}`);
+    if (!badge) return;
+    badge.classList.remove('high', 'low', 'visible');
+    badge.textContent = '';
+    const wrapper = badge.closest('.input-wrapper');
+    if (wrapper) wrapper.classList.remove('confidence-low', 'confidence-high');
+  });
+}
+
+// ===== TESSERACT.JS FALLBACK OCR =====
+
+async function fallbackOCR() {
+  showToast('AI unavailable — trying local OCR...', 'info');
+
+  // Dynamically load Tesseract.js if not already loaded
+  if (!window.Tesseract) {
+    try {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      document.head.appendChild(script);
+      await new Promise((resolve, reject) => {
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Failed to load OCR library'));
+      });
+    } catch (err) {
+      throw new Error('Could not load local OCR: ' + err.message);
+    }
+  }
+
+  // Create a data URL from the base64 image
+  const dataUrl = `data:${imageMimeType};base64,${imageBase64}`;
+
+  // Recognize text
+  const { data } = await Tesseract.recognize(dataUrl, 'eng', {
+    logger: () => {} // Silent
+  });
+
+  const text = data.text;
+
+  // Parse OCR text to find values near keywords
+  const result = { fuel_economy: null, distance: null, duration: null };
+
+  // Look for fuel economy (number near "km/L" or "km/l")
+  const fuelMatch = text.match(/(\d+\.?\d*)\s*km\s*\/\s*[lL]/);
+  if (fuelMatch) result.fuel_economy = parseFloat(fuelMatch[1]);
+
+  // Look for distance (number near "km" but not "km/L")
+  const distMatches = [...text.matchAll(/(\d+\.?\d*)\s*km(?!\s*\/)/gi)];
+  if (distMatches.length > 0) {
+    // Pick the largest number that looks like a distance
+    result.distance = Math.max(...distMatches.map(m => parseFloat(m[1])));
+  }
+
+  // Look for duration (number near "min" or time pattern like "1h 23m")
+  const durMinMatch = text.match(/(\d+)\s*min/i);
+  if (durMinMatch) {
+    result.duration = parseInt(durMinMatch[1]);
+  } else {
+    const durHmMatch = text.match(/(\d+)\s*h\s*(\d+)\s*m/i);
+    if (durHmMatch) {
+      result.duration = parseInt(durHmMatch[1]) * 60 + parseInt(durHmMatch[2]);
+    }
+  }
+
+  return result;
+}
+
 // ===== EXTRACT DATA =====
 async function handleExtract() {
-  if (!imageBase64 || !CONFIG.SCRIPT_URL) {
-    if (!CONFIG.SCRIPT_URL) {
-      showToast('Please set the Apps Script URL in app.js', 'error');
-    }
+  if (!imageBase64) return;
+
+  if (!CONFIG.SCRIPT_URL) {
+    showToast('Please set the Apps Script URL in app.js', 'error');
     return;
   }
 
   setButtonLoading(extractBtn, extractSpinner, true);
 
+  let result = null;
+  let usedFallback = false;
+
   try {
+    // Try Gemini extraction via server
     const response = await fetch(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -208,31 +511,65 @@ async function handleExtract() {
 
     if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
-    const result = await response.json();
+    result = await response.json();
 
     if (result.error) throw new Error(result.error);
-
-    // Populate extracted fields
-    fields.fuelEconomy.value = result.fuel_economy ?? '';
-    fields.distance.value = result.distance ?? '';
-    fields.duration.value = result.duration ?? '';
-
-    // Auto-fill date & time
-    const now = new Date();
-    fields.tripDate.value = formatDate(now);
-    fields.arrivalTime.value = formatTime(now);
-
-    // Auto-fill "From" with the last trip's destination
-    if (cachedLastDestination) {
-      fields.tripFrom.value = cachedLastDestination;
+  } catch (serverErr) {
+    // Gemini failed — try Tesseract.js fallback
+    try {
+      result = await fallbackOCR();
+      usedFallback = true;
+    } catch (ocrErr) {
+      showToast('Extraction failed: ' + serverErr.message, 'error');
+      setButtonLoading(extractBtn, extractSpinner, false);
+      return;
     }
-
-    goToScreen(1);
-  } catch (err) {
-    showToast('Extraction failed: ' + err.message, 'error');
-  } finally {
-    setButtonLoading(extractBtn, extractSpinner, false);
   }
+
+  // Populate extracted fields
+  fields.fuelEconomy.value = result.fuel_economy ?? '';
+  fields.distance.value = result.distance ?? '';
+  fields.duration.value = result.duration ?? '';
+
+  // Apply confidence indicators
+  if (result.confidence && !usedFallback) {
+    applyConfidence('confFuelEconomy', result.confidence.fuel_economy);
+    applyConfidence('confDistance', result.confidence.distance);
+    applyConfidence('confDuration', result.confidence.duration);
+  } else if (usedFallback) {
+    // Low confidence for all OCR values
+    applyConfidence('confFuelEconomy', result.fuel_economy != null ? 0.3 : null);
+    applyConfidence('confDistance', result.distance != null ? 0.3 : null);
+    applyConfidence('confDuration', result.duration != null ? 0.3 : null);
+    showToast('Used local OCR — please verify values', 'info');
+  } else {
+    clearConfidenceBadges();
+  }
+
+  // Auto-fill date & time from EXIF or current time
+  const timeSource = exifDateTime || new Date();
+  fields.tripDate.value = formatDate(timeSource);
+  fields.arrivalTime.value = formatTime(timeSource);
+
+  // Auto-fill "From" with the last trip's destination
+  if (cachedLastDestination) {
+    fields.tripFrom.value = cachedLastDestination;
+  }
+
+  // Set photo preview on review screen
+  if (currentBlobUrl) {
+    reviewThumbnail.src = currentBlobUrl;
+    reviewFullImage.src = currentBlobUrl;
+    photoPreviewBar.style.display = '';
+  } else {
+    photoPreviewBar.style.display = 'none';
+  }
+  // Reset to collapsed state
+  photoPreviewBar.classList.remove('expanded');
+  photoPreviewExpanded.classList.add('hidden');
+
+  goToScreen(1);
+  setButtonLoading(extractBtn, extractSpinner, false);
 }
 
 // ===== FETCH LAST DESTINATION =====
@@ -251,9 +588,93 @@ async function fetchLastDestination() {
     const result = await response.json();
     if (result.lastDestination) {
       cachedLastDestination = result.lastDestination;
+      localStorage.setItem('lastDestination', result.lastDestination);
     }
   } catch {
-    // Silent fail — this is just a convenience feature
+    // Silent fail — we already have the localStorage cache
+  }
+}
+
+// ===== OFFLINE SUBMISSION QUEUE =====
+
+function getPendingTrips() {
+  return JSON.parse(localStorage.getItem('pendingTrips') || '[]');
+}
+
+function savePendingTrip(payload) {
+  const pending = getPendingTrips();
+  pending.push({ ...payload, queuedAt: new Date().toISOString() });
+  localStorage.setItem('pendingTrips', JSON.stringify(pending));
+
+  // Cache destination locally
+  if (payload.destination) {
+    cachedLastDestination = payload.destination;
+    localStorage.setItem('lastDestination', payload.destination);
+  }
+
+  updateSyncBadge();
+}
+
+function updateSyncBadge() {
+  const pending = getPendingTrips();
+  if (pending.length > 0) {
+    syncBadge.classList.remove('hidden');
+    syncCount.textContent = pending.length;
+  } else {
+    syncBadge.classList.add('hidden');
+    pendingPanel.classList.add('hidden');
+  }
+}
+
+function renderPendingPanel() {
+  const pending = getPendingTrips();
+  if (pending.length === 0) {
+    pendingPanelList.innerHTML = '<div class="pending-empty">No pending trips</div>';
+    return;
+  }
+
+  pendingPanelList.innerHTML = pending.map((trip, i) => `
+    <div class="pending-item">
+      <strong>${trip.date}</strong> at ${trip.arrivalTime}<br>
+      📏 ${trip.distance} km · ⛽ ${trip.fuelEconomy} km/L · ⏱ ${trip.duration} min
+      ${trip.from ? `<br>📍 ${trip.from} → ${trip.destination}` : ''}
+    </div>
+  `).join('');
+}
+
+async function syncPendingTrips() {
+  const pending = getPendingTrips();
+  if (pending.length === 0) return;
+
+  let synced = 0;
+  const remaining = [];
+
+  for (const trip of pending) {
+    try {
+      const { queuedAt, ...payload } = trip;
+      const response = await fetch(CONFIG.SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload)
+      });
+      if (response.ok) {
+        const result = await response.json();
+        if (!result.error) {
+          synced++;
+          continue;
+        }
+      }
+      remaining.push(trip);
+    } catch {
+      remaining.push(trip);
+    }
+  }
+
+  localStorage.setItem('pendingTrips', JSON.stringify(remaining));
+  updateSyncBadge();
+
+  if (synced > 0) {
+    showToast(`${synced} trip${synced > 1 ? 's' : ''} synced successfully`, 'success');
   }
 }
 
@@ -271,19 +692,47 @@ async function handleSubmit() {
 
   setButtonLoading(submitBtn, submitSpinner, true);
 
-  try {
-    const payload = {
-      action: 'submit',
-      date: fields.tripDate.value,
-      arrivalTime: fields.arrivalTime.value,
-      fuelEconomy: fuelEconomy,
-      distance: distance,
-      duration: duration,
-      from: fields.tripFrom.value.trim(),
-      destination: fields.tripDestination.value.trim(),
-      purpose: fields.tripPurpose.value.trim()
-    };
+  const payload = {
+    action: 'submit',
+    date: fields.tripDate.value,
+    arrivalTime: fields.arrivalTime.value,
+    fuelEconomy: fuelEconomy,
+    distance: distance,
+    duration: duration,
+    from: fields.tripFrom.value.trim(),
+    destination: fields.tripDestination.value.trim(),
+    purpose: fields.tripPurpose.value.trim()
+  };
 
+  // Show success summary helper
+  const showSuccess = (offlineMsg = '') => {
+    const summary = $('#successSummary');
+    summary.innerHTML = `
+      <strong>${payload.date}</strong> at ${payload.arrivalTime}<br>
+      📏 ${payload.distance} km &nbsp;·&nbsp; ⛽ ${payload.fuelEconomy} km/L &nbsp;·&nbsp; ⏱ ${payload.duration} min<br>
+      ${payload.from ? `📍 ${payload.from} → ${payload.destination}` : ''}
+      ${payload.purpose ? `<br>📝 ${payload.purpose}` : ''}
+      ${offlineMsg ? `<br><em style="color: var(--text-muted); font-size: 0.75rem;">${offlineMsg}</em>` : ''}
+    `;
+
+    // Update cached destination for the next trip
+    if (payload.destination) {
+      cachedLastDestination = payload.destination;
+      localStorage.setItem('lastDestination', payload.destination);
+    }
+
+    goToScreen(2);
+  };
+
+  // Check if we're offline before even trying
+  if (!navigator.onLine) {
+    savePendingTrip(payload);
+    showSuccess('📡 Saved offline — will sync when connected');
+    setButtonLoading(submitBtn, submitSpinner, false);
+    return;
+  }
+
+  try {
     const response = await fetch(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -296,23 +745,15 @@ async function handleSubmit() {
 
     if (result.error) throw new Error(result.error);
 
-    // Show success with summary
-    const summary = $('#successSummary');
-    summary.innerHTML = `
-      <strong>${payload.date}</strong> at ${payload.arrivalTime}<br>
-      📏 ${payload.distance} km &nbsp;·&nbsp; ⛽ ${payload.fuelEconomy} km/L &nbsp;·&nbsp; ⏱ ${payload.duration} min<br>
-      ${payload.from ? `📍 ${payload.from} → ${payload.destination}` : ''}
-      ${payload.purpose ? `<br>📝 ${payload.purpose}` : ''}
-    `;
-
-    // Update cached destination for the next trip
-    if (payload.destination) {
-      cachedLastDestination = payload.destination;
-    }
-
-    goToScreen(2);
+    showSuccess();
   } catch (err) {
-    showToast('Submit failed: ' + err.message, 'error');
+    // Network error — save offline
+    if (!navigator.onLine || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+      savePendingTrip(payload);
+      showSuccess('📡 Saved offline — will sync when connected');
+    } else {
+      showToast('Submit failed: ' + err.message, 'error');
+    }
   } finally {
     setButtonLoading(submitBtn, submitSpinner, false);
   }
@@ -321,6 +762,7 @@ async function handleSubmit() {
 // ===== NEW TRIP =====
 function handleNewTrip() {
   clearImage();
+  clearConfidenceBadges();
   Object.values(fields).forEach((input) => (input.value = ''));
   goToScreen(0);
 }
@@ -380,7 +822,8 @@ function formatDate(date) {
 function formatTime(date) {
   const h = String(date.getHours()).padStart(2, '0');
   const m = String(date.getMinutes()).padStart(2, '0');
-  return `${h}:${m}`;
+  const s = String(date.getSeconds()).padStart(2, '0');
+  return `${h}:${m}:${s}`;
 }
 
 let toastTimeout = null;

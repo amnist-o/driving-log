@@ -28,6 +28,9 @@
       </svg>
       <span>Drive Log</span>
     </div>
+    <div class="sync-badge hidden" id="syncBadge" title="Pending trips">
+      <span id="syncCount">0</span>
+    </div>
     <!-- Step Indicator -->
     <div class="steps" id="stepIndicator">
       <div class="step active" data-step="0">
@@ -46,6 +49,14 @@
       </div>
     </div>
   </header>
+
+  <div class="pending-panel hidden" id="pendingPanel">
+    <div class="pending-panel-header">
+      <span>Pending Trips</span>
+      <button class="btn-close-panel" id="closePanelBtn">✕</button>
+    </div>
+    <div class="pending-panel-list" id="pendingPanelList"></div>
+  </div>
 
   <!-- Screen Container -->
   <main class="screen-container">
@@ -105,12 +116,23 @@
           </svg>
           <div class="spinner hidden" id="extractSpinner"></div>
         </button>
+        <button class="btn-skip" id="skipBtn">Skip — Enter Manually</button>
       </div>
     </section>
 
     <!-- Screen 2: Form -->
     <section class="screen screen-form" id="screenForm">
       <div class="card glass-card">
+        <div class="photo-preview-bar" id="photoPreviewBar">
+          <div class="photo-preview-collapsed" id="photoPreviewCollapsed">
+            <img id="reviewThumbnail" class="review-thumbnail" alt="Dashboard photo">
+            <span class="photo-preview-label">Tap to view photo</span>
+            <svg class="chevron-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="photo-preview-expanded hidden" id="photoPreviewExpanded">
+            <img id="reviewFullImage" class="review-full-image" alt="Dashboard photo">
+          </div>
+        </div>
         <div class="card-header">
           <h1>Trip Details</h1>
           <p class="subtitle">Verify extracted data & fill in trip info</p>
@@ -130,6 +152,7 @@
               <div class="input-wrapper">
                 <input type="number" step="0.1" id="fuelEconomy" placeholder="0.0">
                 <span class="input-unit">km/L</span>
+                <span class="confidence-badge" id="confFuelEconomy"></span>
               </div>
             </div>
             <div class="form-group">
@@ -137,6 +160,7 @@
               <div class="input-wrapper">
                 <input type="number" step="0.1" id="distance" placeholder="0.0">
                 <span class="input-unit">km</span>
+                <span class="confidence-badge" id="confDistance"></span>
               </div>
             </div>
             <div class="form-group">
@@ -144,6 +168,7 @@
               <div class="input-wrapper">
                 <input type="number" step="1" id="duration" placeholder="0">
                 <span class="input-unit">min</span>
+                <span class="confidence-badge" id="confDuration"></span>
               </div>
             </div>
           </div>
@@ -167,7 +192,7 @@
             <div class="form-group">
               <label for="arrivalTime">Arrival Time</label>
               <div class="input-wrapper">
-                <input type="time" id="arrivalTime">
+                <input type="time" step="1" id="arrivalTime">
               </div>
             </div>
           </div>

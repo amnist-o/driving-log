@@ -65,7 +65,7 @@ function handleExtract(data) {
   // Try models in order — fallback if quota exceeded
   // gemini-2.5-flash-lite: stable, cheapest, clean JSON output
   // gemini-3.1-flash-lite: newest generation fallback
-  const models = ['gemini-2.5-flash-lite', 'gemini-3.1-flash-lite'];
+  const models = ['gemini-2.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash'];
 
   for (let m = 0; m < models.length; m++) {
     const model = models[m];
@@ -76,12 +76,17 @@ function handleExtract(data) {
       contents: [{
         parts: [
           {
-            text: 'Extract these values from the car dashboard display image:\n'
-              + '- fuel_economy (the "This Drive" value in km/L, as a float)\n'
-              + '- distance (Driving Distance in km, as a float)\n'
-              + '- duration (Driving Time in minutes, as an integer)\n\n'
-              + 'Return ONLY valid JSON, no markdown, no explanation:\n'
-              + '{"fuel_economy": <number>, "distance": <number>, "duration": <number>}'
+            text: 'You are reading a car dashboard trip-summary screen photo.\n'
+              + 'Read the PROMINENT DISPLAYED VALUES on the screen — NOT chart axis labels, scale markers, or decorative numbers.\n\n'
+              + 'Extract these three values:\n'
+              + '- fuel_economy: the large number associated with "This Drive" or a similar per-trip heading, in km/L (float). '
+              + 'For a normal passenger car this is typically 5–25 km/L. If your reading falls outside that range, re-examine the image carefully.\n'
+              + '- distance: Driving Distance in km (float).\n'
+              + '- duration: Driving Time in minutes (integer).\n\n'
+              + 'For each value, also provide a confidence score between 0.0 (guess) and 1.0 (certain).\n\n'
+              + 'Return ONLY valid JSON — no markdown, no explanation:\n'
+              + '{"fuel_economy": <number>, "distance": <number>, "duration": <number>, '
+              + '"confidence": {"fuel_economy": <0-1>, "distance": <0-1>, "duration": <0-1>}}'
           },
           {
             inline_data: {
@@ -93,7 +98,7 @@ function handleExtract(data) {
       }],
       generationConfig: {
         temperature: 0,
-        maxOutputTokens: 100
+        maxOutputTokens: 200
       }
     };
 
@@ -119,13 +124,25 @@ function handleExtract(data) {
     // Parse Gemini's response
     const text = result.candidates[0].content.parts[0].text;
 
-    // Extract JSON from response (handle possible markdown wrapping)
-    const jsonMatch = text.match(/\{[^}]+\}/);
-    if (!jsonMatch) {
+    // Extract JSON from response — handles nested braces (e.g. confidence object)
+    let jsonStr = null;
+    const start = text.indexOf('{');
+    if (start !== -1) {
+      let depth = 0;
+      for (let i = start; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}') depth--;
+        if (depth === 0) {
+          jsonStr = text.substring(start, i + 1);
+          break;
+        }
+      }
+    }
+    if (!jsonStr) {
       return jsonResponse({ error: 'Could not parse AI response: ' + text });
     }
 
-    const extracted = JSON.parse(jsonMatch[0]);
+    const extracted = JSON.parse(jsonStr);
     return jsonResponse(extracted);
   }
 

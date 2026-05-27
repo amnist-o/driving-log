@@ -1,0 +1,5 @@
+User feedbacks 
+	◦	Sometimes AI that use to extract data from photo has high demand and leads to unable to use it to extract data.
+	◦	Sometimes AI extracts wrong data. It extracted fuel economy as 30km/l which is the y axis label.
+	◦	Time measurement was in hh:mm which is gather from the time of procedure. This will mislead when upload photo from the past and mismatch the old data precision at hh:mm:ss.
+	◦	The system requires internet connection. Have to think of a way when internet connection is not available.
