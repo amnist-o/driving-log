@@ -2,15 +2,21 @@
 
 A mobile-first web app that extracts driving data from your car's dashboard photo using AI and logs it to Google Sheets.
 
-**Take a photo → AI reads the numbers → You fill in 3 fields → Done.**
+**Take a photo → AI reads the numbers → Verify & fill in trip info → Done.**
 
 ## Features
 
 - 📷 Snap or upload a dashboard photo
-- 🤖 Gemini Flash AI extracts fuel economy, distance, and duration
-- 📅 Auto-fills date and time
+- 🤖 Gemini Flash AI extracts fuel economy, distance, and duration with confidence scores
+- 🔄 Tesseract.js fallback OCR when AI is unavailable (runs entirely in-browser)
+- ✏️ "Skip — Enter Manually" option to bypass AI entirely
+- 🖼️ Collapsible photo preview on the review screen for cross-checking extracted values
+- 📅 Auto-fills date and time from photo EXIF metadata (with `hh:mm:ss` precision)
+- 📍 Auto-fills "From" with the previous trip's destination
 - 📝 Simple form for From, Destination, and Purpose
 - 📊 Submits directly to your Google Sheet
+- 📡 Offline support — queues trips locally and auto-syncs when back online
+- 🔢 Pending trips badge with sync status panel
 
 ## Architecture
 
@@ -18,13 +24,20 @@ A mobile-first web app that extracts driving data from your car's dashboard phot
 Phone Browser (GitHub Pages)
   ↓ photo (base64)
 Google Apps Script (doPost)
-  ↓ calls Gemini Flash API
-  ↓ returns extracted JSON
+  ↓ calls Gemini Flash API (4-model fallback chain)
+  ↓ returns extracted JSON + confidence scores
 Phone Browser
+  ↓ user verifies data (with photo reference + confidence indicators)
   ↓ form submission
 Google Apps Script
   ↓ appends row
 Google Sheets ✅
+
+Offline path:
+  Phone Browser → localStorage queue → auto-sync on reconnect → Google Sheets ✅
+  
+Fallback extraction:
+  Gemini fails → Tesseract.js (client-side OCR) → manual entry
 ```
 
 ## Setup Guide
@@ -64,9 +77,19 @@ Google Sheets ✅
 1. Visit `https://<your-username>.github.io/driving-log/`
 2. Tap **Share → Add to Home Screen** for an app-like experience
 
-## Date Format
+## How It Works
 
-The script sends dates as `DD/MM/YYYY`. If your sheet uses a different format, edit the `handleSubmit` function in `Code.gs`.
+### AI Extraction
+The backend tries up to 4 Gemini models in sequence (`gemini-2.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-2.0-flash` → `gemini-1.5-flash`). If all fail (quota exhaustion), the app falls back to Tesseract.js client-side OCR or lets you enter data manually.
+
+### Confidence Indicators
+Each extracted value gets a confidence score from the AI. High confidence (≥ 0.8) shows a green ✓, low confidence shows an amber ⚠ with a highlighted border so you know to double-check.
+
+### EXIF Time Extraction
+When you upload an old photo, the app reads the EXIF `DateTimeOriginal` timestamp (second precision) and auto-fills the date and time from when the photo was actually taken — not from the current time.
+
+### Offline Support
+If you're offline, trips are saved to `localStorage` and a pending badge appears in the header. When you come back online, the app automatically syncs all queued trips and shows a confirmation toast.
 
 ## Updating the Apps Script
 
@@ -79,7 +102,7 @@ If you update `Code.gs`, you need to create a **new deployment version**:
 
 ## Cost
 
-Using `gemini-2.0-flash` with a minimal prompt (image + ~50 text tokens), each extraction costs a fraction of a cent. With Google AI Pro, you have generous free limits.
+The backend uses Gemini Flash Lite models by default (cheapest). Each extraction costs a fraction of a cent. With Google AI Studio's free tier, you have generous limits. The Tesseract.js fallback runs entirely in-browser at zero cost.
 
 ## License
 
