@@ -1,6 +1,8 @@
 /* ==========================================
-   DRIVE LOG — App Logic
+   DRIVE LOG — App Orchestrator
    ========================================== */
+
+import { extractData } from './extraction.js';
 
 // ===== CONFIGURATION =====
 // After deploying the Apps Script, paste the web app URL here:
@@ -76,22 +78,7 @@ newTripBtn.addEventListener('click', handleNewTrip);
 
 // Skip — Enter Manually
 skipBtn.addEventListener('click', () => {
-  const timeSource = exifDateTime || new Date();
-  fields.tripDate.value = formatDate(timeSource);
-  fields.arrivalTime.value = formatTime(timeSource);
-  if (cachedLastDestination) {
-    fields.tripFrom.value = cachedLastDestination;
-  }
-  // Set photo preview on review screen
-  if (currentBlobUrl) {
-    reviewThumbnail.src = currentBlobUrl;
-    reviewFullImage.src = currentBlobUrl;
-    photoPreviewBar.style.display = '';
-  } else {
-    photoPreviewBar.style.display = 'none';
-  }
-  clearConfidenceBadges();
-  goToScreen(1);
+  transitionToReview(null);
 });
 
 // Photo preview toggle
@@ -425,123 +412,30 @@ function clearConfidenceBadges() {
   });
 }
 
-// ===== TESSERACT.JS FALLBACK OCR =====
+// ===== TRANSITION TO REVIEW (unified) =====
 
-async function fallbackOCR() {
-  showToast('AI unavailable — trying local OCR...', 'info');
+/**
+ * Transition to the Review screen.
+ * If extractionResult is provided, populate fields and apply confidence.
+ * If null (manual entry / skip), clear confidence and leave fields empty.
+ *
+ * @param {Object|null} extractionResult - Result from extractData(), or null for manual entry
+ */
+function transitionToReview(extractionResult) {
+  if (extractionResult) {
+    // Populate extracted values
+    fields.fuelEconomy.value = extractionResult.values.fuel_economy ?? '';
+    fields.distance.value = extractionResult.values.distance ?? '';
+    fields.duration.value = extractionResult.values.duration ?? '';
 
-  // Dynamically load Tesseract.js if not already loaded
-  if (!window.Tesseract) {
-    try {
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-      document.head.appendChild(script);
-      await new Promise((resolve, reject) => {
-        script.onload = resolve;
-        script.onerror = () => reject(new Error('Failed to load OCR library'));
-      });
-    } catch (err) {
-      throw new Error('Could not load local OCR: ' + err.message);
+    // Apply confidence indicators
+    applyConfidence('confFuelEconomy', extractionResult.confidence.fuel_economy);
+    applyConfidence('confDistance', extractionResult.confidence.distance);
+    applyConfidence('confDuration', extractionResult.confidence.duration);
+
+    if (extractionResult.source === 'tesseract') {
+      showToast('Used local OCR — please verify values', 'info');
     }
-  }
-
-  // Create a data URL from the base64 image
-  const dataUrl = `data:${imageMimeType};base64,${imageBase64}`;
-
-  // Recognize text
-  const { data } = await Tesseract.recognize(dataUrl, 'eng', {
-    logger: () => {} // Silent
-  });
-
-  const text = data.text;
-
-  // Parse OCR text to find values near keywords
-  const result = { fuel_economy: null, distance: null, duration: null };
-
-  // Look for fuel economy (number near "km/L" or "km/l")
-  const fuelMatch = text.match(/(\d+\.?\d*)\s*km\s*\/\s*[lL]/);
-  if (fuelMatch) result.fuel_economy = parseFloat(fuelMatch[1]);
-
-  // Look for distance (number near "km" but not "km/L")
-  const distMatches = [...text.matchAll(/(\d+\.?\d*)\s*km(?!\s*\/)/gi)];
-  if (distMatches.length > 0) {
-    // Pick the largest number that looks like a distance
-    result.distance = Math.max(...distMatches.map(m => parseFloat(m[1])));
-  }
-
-  // Look for duration (number near "min" or time pattern like "1h 23m")
-  const durMinMatch = text.match(/(\d+)\s*min/i);
-  if (durMinMatch) {
-    result.duration = parseInt(durMinMatch[1]);
-  } else {
-    const durHmMatch = text.match(/(\d+)\s*h\s*(\d+)\s*m/i);
-    if (durHmMatch) {
-      result.duration = parseInt(durHmMatch[1]) * 60 + parseInt(durHmMatch[2]);
-    }
-  }
-
-  return result;
-}
-
-// ===== EXTRACT DATA =====
-async function handleExtract() {
-  if (!imageBase64) return;
-
-  if (!CONFIG.SCRIPT_URL) {
-    showToast('Please set the Apps Script URL in app.js', 'error');
-    return;
-  }
-
-  setButtonLoading(extractBtn, extractSpinner, true);
-
-  let result = null;
-  let usedFallback = false;
-
-  try {
-    // Try Gemini extraction via server
-    const response = await fetch(CONFIG.SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action: 'extract',
-        image: imageBase64,
-        mimeType: imageMimeType
-      })
-    });
-
-    if (!response.ok) throw new Error(`Server error: ${response.status}`);
-
-    result = await response.json();
-
-    if (result.error) throw new Error(result.error);
-  } catch (serverErr) {
-    // Gemini failed — try Tesseract.js fallback
-    try {
-      result = await fallbackOCR();
-      usedFallback = true;
-    } catch (ocrErr) {
-      showToast('Extraction failed: ' + serverErr.message, 'error');
-      setButtonLoading(extractBtn, extractSpinner, false);
-      return;
-    }
-  }
-
-  // Populate extracted fields
-  fields.fuelEconomy.value = result.fuel_economy ?? '';
-  fields.distance.value = result.distance ?? '';
-  fields.duration.value = result.duration ?? '';
-
-  // Apply confidence indicators
-  if (result.confidence && !usedFallback) {
-    applyConfidence('confFuelEconomy', result.confidence.fuel_economy);
-    applyConfidence('confDistance', result.confidence.distance);
-    applyConfidence('confDuration', result.confidence.duration);
-  } else if (usedFallback) {
-    // Low confidence for all OCR values
-    applyConfidence('confFuelEconomy', result.fuel_economy != null ? 0.3 : null);
-    applyConfidence('confDistance', result.distance != null ? 0.3 : null);
-    applyConfidence('confDuration', result.duration != null ? 0.3 : null);
-    showToast('Used local OCR — please verify values', 'info');
   } else {
     clearConfidenceBadges();
   }
@@ -569,7 +463,28 @@ async function handleExtract() {
   photoPreviewExpanded.classList.add('hidden');
 
   goToScreen(1);
-  setButtonLoading(extractBtn, extractSpinner, false);
+}
+
+// ===== EXTRACT DATA =====
+
+async function handleExtract() {
+  if (!imageBase64) return;
+
+  if (!CONFIG.SCRIPT_URL) {
+    showToast('Please set the Apps Script URL in app.js', 'error');
+    return;
+  }
+
+  setButtonLoading(extractBtn, extractSpinner, true);
+
+  try {
+    const result = await extractData(imageBase64, imageMimeType, CONFIG.SCRIPT_URL);
+    transitionToReview(result);
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    setButtonLoading(extractBtn, extractSpinner, false);
+  }
 }
 
 // ===== FETCH LAST DESTINATION =====
