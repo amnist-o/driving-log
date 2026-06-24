@@ -25,14 +25,20 @@
  * @throws {Error} if both adapters fail
  */
 export async function extractData(imageBase64, mimeType, scriptUrl) {
+  let serverErr;
   try {
     return await geminiAdapter(imageBase64, mimeType, scriptUrl);
-  } catch (serverErr) {
-    try {
-      return await tesseractAdapter(imageBase64, mimeType);
-    } catch (ocrErr) {
-      throw new Error(`Extraction failed: ${serverErr.message}`);
-    }
+  } catch (err) {
+    serverErr = err;
+  }
+
+  // Gemini failed — try Tesseract.js fallback
+  try {
+    return await tesseractAdapter(imageBase64, mimeType);
+  } catch (ocrErr) {
+    throw new Error(
+      `Server extraction failed (${serverErr.message}). Local OCR also failed (${ocrErr.message}).`
+    );
   }
 }
 
@@ -73,34 +79,61 @@ async function geminiAdapter(imageBase64, mimeType, scriptUrl) {
 // ===== TESSERACT ADAPTER =====
 
 async function tesseractAdapter(imageBase64, mimeType) {
+  const CDN_BASE = 'https://cdn.jsdelivr.net/npm/tesseract.js@5';
+
   // Dynamically load Tesseract.js if not already loaded
   if (!window.Tesseract) {
     const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    script.src = `${CDN_BASE}/dist/tesseract.min.js`;
     document.head.appendChild(script);
-    await new Promise((resolve, reject) => {
-      script.onload = resolve;
-      script.onerror = () => reject(new Error('Failed to load OCR library'));
-    });
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Failed to load OCR library'));
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('OCR library load timed out')), 15000)
+      )
+    ]);
   }
 
-  const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+  // Convert base64 → Blob → Object URL (iOS Safari chokes on large data: URLs in Workers)
+  const byteString = atob(imageBase64);
+  const bytes = new Uint8Array(byteString.length);
+  for (let i = 0; i < byteString.length; i++) {
+    bytes[i] = byteString.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: mimeType });
+  const blobUrl = URL.createObjectURL(blob);
 
-  const { data } = await Tesseract.recognize(dataUrl, 'eng', {
-    logger: () => {} // Silent
-  });
+  try {
+    // Wrap recognition in a timeout so it doesn't hang
+    const { data } = await Promise.race([
+      Tesseract.recognize(blobUrl, 'eng', {
+        logger: () => {},
+        // Explicit paths prevent iOS worker resolution failures
+        workerPath: `${CDN_BASE}/dist/worker.min.js`,
+        corePath: `${CDN_BASE}/dist/tesseract-core-simd-lstm.wasm.js`,
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('OCR recognition timed out')), 30000)
+      )
+    ]);
 
-  const parsed = parseOcrText(data.text);
+    const parsed = parseOcrText(data.text);
 
-  return {
-    values: parsed,
-    confidence: {
-      fuel_economy: parsed.fuel_economy != null ? 0.3 : null,
-      distance: parsed.distance != null ? 0.3 : null,
-      duration: parsed.duration != null ? 0.3 : null
-    },
-    source: 'tesseract'
-  };
+    return {
+      values: parsed,
+      confidence: {
+        fuel_economy: parsed.fuel_economy != null ? 0.3 : null,
+        distance: parsed.distance != null ? 0.3 : null,
+        duration: parsed.duration != null ? 0.3 : null
+      },
+      source: 'tesseract'
+    };
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
 }
 
 /**

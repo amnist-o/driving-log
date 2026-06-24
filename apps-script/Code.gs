@@ -62,10 +62,11 @@ function handleExtract(data) {
     return jsonResponse({ error: 'GEMINI_API_KEY not set in Script Properties' });
   }
 
-  // Try models in order — fallback if quota exceeded
-  // gemini-2.5-flash-lite: stable, cheapest, clean JSON output
-  // gemini-3.1-flash-lite: newest generation fallback
-  const models = ['gemini-2.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  // Try models in order — fallback if one fails (quota, deprecation, etc.)
+  // gemini-2.5-flash: stable production workhorse
+  // gemini-3.5-flash: newest frontier model (May 2026)
+  // gemini-3.1-flash-lite: cheapest fallback
+  const models = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
 
   for (let m = 0; m < models.length; m++) {
     const model = models[m];
@@ -113,9 +114,9 @@ function handleExtract(data) {
     const result = JSON.parse(response.getContentText());
 
     if (result.error) {
-      // If quota exceeded and we have more models to try, continue
-      if (result.error.message && result.error.message.indexOf('quota') !== -1 && m < models.length - 1) {
-        Utilities.sleep(2000); // Brief pause before trying next model
+      // If we have more models to try, fall through on ANY error
+      if (m < models.length - 1) {
+        Utilities.sleep(1000);
         continue;
       }
       return jsonResponse({ error: result.error.message });
