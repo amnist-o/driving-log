@@ -36,9 +36,25 @@ export async function extractData(imageBase64, mimeType, scriptUrl) {
   try {
     return await tesseractAdapter(imageBase64, mimeType);
   } catch (ocrErr) {
-    throw new Error(
-      `Server extraction failed (${serverErr.message}). Local OCR also failed (${ocrErr.message}).`
+    const ocrMsg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr || 'unknown error');
+    const error = new Error(
+      `Server extraction failed (${serverErr.message}). Local OCR also failed (${ocrMsg}).`
     );
+
+    // Attach structured report for the error-report UI
+    error.report = {
+      timestamp: new Date().toISOString(),
+      server: {
+        message: serverErr.message,
+        attempts: serverErr.debug?.attempts || []
+      },
+      ocr: {
+        message: ocrMsg,
+        rawText: ocrErr.ocrText || null
+      }
+    };
+
+    throw error;
   }
 }
 
@@ -59,7 +75,11 @@ async function geminiAdapter(imageBase64, mimeType, scriptUrl) {
 
   const result = await response.json();
 
-  if (result.error) throw new Error(result.error);
+  if (result.error) {
+    const err = new Error(result.error);
+    err.debug = result.debug || null;   // Preserve server diagnostics
+    throw err;
+  }
 
   return {
     values: {

@@ -54,7 +54,8 @@ function doPost(e) {
 }
 
 /**
- * Extract fuel economy, distance, duration from dashboard image using Gemini
+ * Extract fuel economy, distance, duration from dashboard image using Gemini.
+ * On failure, returns { error, debug: { attempts[] } } for client-side diagnostics.
  */
 function handleExtract(data) {
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
@@ -63,17 +64,16 @@ function handleExtract(data) {
   }
 
   // Try models in order — fallback if one fails (quota, deprecation, etc.)
-  // gemini-2.5-flash: stable production workhorse
-  // gemini-3.5-flash: newest frontier model (May 2026)
-  // gemini-3.1-flash-lite: cheapest fallback
   const models = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+  var attempts = [];
 
-  for (let m = 0; m < models.length; m++) {
-    const model = models[m];
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/'
+  for (var m = 0; m < models.length; m++) {
+    var model = models[m];
+    var attempt = { model: model };
+    var url = 'https://generativelanguage.googleapis.com/v1beta/models/'
       + model + ':generateContent?key=' + apiKey;
 
-    const payload = {
+    var payload = {
       contents: [{
         parts: [
           {
@@ -81,9 +81,9 @@ function handleExtract(data) {
               + 'Read the PROMINENT DISPLAYED VALUES on the screen — NOT chart axis labels, scale markers, or decorative numbers.\n\n'
               + 'Extract these three values:\n'
               + '- fuel_economy: the large number associated with "This Drive" or a similar per-trip heading, in km/L (float). '
-              + 'For a normal passenger car this is typically 5–25 km/L. If your reading falls outside that range, re-examine the image carefully.\n'
+              + 'Valid range is 0–35 km/L. A value of 0 is valid (e.g. EV mode or engine-off coasting).\n'
               + '- distance: Driving Distance in km (float).\n'
-              + '- duration: Driving Time in minutes (integer).\n\n'
+              + '- duration: Driving Time in minutes (integer). If shown as "Xh Ym", convert to total minutes.\n\n'
               + 'For each value, also provide a confidence score between 0.0 (guess) and 1.0 (certain).\n\n'
               + 'Return ONLY valid JSON — no markdown, no explanation:\n'
               + '{"fuel_economy": <number>, "distance": <number>, "duration": <number>, '
@@ -99,55 +99,106 @@ function handleExtract(data) {
       }],
       generationConfig: {
         temperature: 0,
-        maxOutputTokens: 200
+        maxOutputTokens: 500,
+        responseMimeType: 'application/json'
       }
     };
 
-    const options = {
+    var options = {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify(payload),
       muteHttpExceptions: true
     };
 
-    const response = UrlFetchApp.fetch(url, options);
-    const result = JSON.parse(response.getContentText());
-
-    if (result.error) {
-      // If we have more models to try, fall through on ANY error
-      if (m < models.length - 1) {
-        Utilities.sleep(1000);
-        continue;
-      }
-      return jsonResponse({ error: result.error.message });
+    // --- Fetch ---
+    var response, result;
+    try {
+      response = UrlFetchApp.fetch(url, options);
+      result = JSON.parse(response.getContentText());
+    } catch (fetchErr) {
+      attempt.error = 'Fetch failed: ' + fetchErr.message;
+      attempts.push(attempt);
+      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      return jsonResponse({ error: 'All models failed (network)', debug: { attempts: attempts } });
     }
 
-    // Parse Gemini's response
-    const text = result.candidates[0].content.parts[0].text;
+    // --- API error (quota, invalid key, etc.) ---
+    if (result.error) {
+      attempt.error = result.error.message || JSON.stringify(result.error);
+      attempts.push(attempt);
+      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      return jsonResponse({ error: attempt.error, debug: { attempts: attempts } });
+    }
 
-    // Extract JSON from response — handles nested braces (e.g. confidence object)
-    let jsonStr = null;
-    const start = text.indexOf('{');
-    if (start !== -1) {
-      let depth = 0;
-      for (let i = start; i < text.length; i++) {
-        if (text[i] === '{') depth++;
-        else if (text[i] === '}') depth--;
-        if (depth === 0) {
-          jsonStr = text.substring(start, i + 1);
-          break;
+    // --- Extract text from candidate ---
+    var text;
+    try {
+      text = result.candidates[0].content.parts[0].text;
+      attempt.rawText = text.length > 500 ? text.substring(0, 500) + '…' : text;
+    } catch (parseErr) {
+      attempt.error = 'Malformed response — no candidates';
+      attempt.rawResponse = JSON.stringify(result).substring(0, 300);
+      attempts.push(attempt);
+      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      return jsonResponse({ error: 'No usable response from AI', debug: { attempts: attempts } });
+    }
+
+    // --- Parse JSON ---
+    var extracted;
+    try {
+      extracted = JSON.parse(text);
+    } catch (_) {
+      // Fallback: find the outermost balanced { ... } in the response
+      var jsonStr = null;
+      var start = text.indexOf('{');
+      if (start !== -1) {
+        var depth = 0;
+        for (var i = start; i < text.length; i++) {
+          if (text[i] === '{') depth++;
+          else if (text[i] === '}') depth--;
+          if (depth === 0) {
+            jsonStr = text.substring(start, i + 1);
+            break;
+          }
         }
       }
-    }
-    if (!jsonStr) {
-      return jsonResponse({ error: 'Could not parse AI response: ' + text });
+      if (!jsonStr) {
+        attempt.error = 'Could not find valid JSON in response';
+        attempts.push(attempt);
+        if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+        return jsonResponse({ error: 'Could not parse AI response', debug: { attempts: attempts } });
+      }
+      try {
+        extracted = JSON.parse(jsonStr);
+      } catch (e2) {
+        attempt.error = 'Extracted JSON still invalid: ' + e2.message;
+        attempts.push(attempt);
+        if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+        return jsonResponse({ error: 'Invalid JSON in AI response', debug: { attempts: attempts } });
+      }
     }
 
-    const extracted = JSON.parse(jsonStr);
+    // --- Validate: must have at least two of the three expected fields ---
+    var fieldCount = (extracted.fuel_economy != null ? 1 : 0)
+                   + (extracted.distance != null ? 1 : 0)
+                   + (extracted.duration != null ? 1 : 0);
+    if (fieldCount < 2) {
+      attempt.error = 'Only extracted ' + fieldCount + '/3 fields';
+      attempt.parsed = extracted;
+      attempts.push(attempt);
+      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      return jsonResponse({
+        error: 'AI could only extract ' + fieldCount + ' of 3 fields',
+        debug: { attempts: attempts }
+      });
+    }
+
+    // Success
     return jsonResponse(extracted);
   }
 
-  return jsonResponse({ error: 'All models failed — quota may be exhausted. Please try again later.' });
+  return jsonResponse({ error: 'All models failed', debug: { attempts: attempts } });
 }
 
 /**

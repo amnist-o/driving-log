@@ -55,6 +55,12 @@ const pendingPanel = $('#pendingPanel');
 const pendingPanelList = $('#pendingPanelList');
 const closePanelBtn = $('#closePanelBtn');
 
+// Error report overlay
+const errorReportOverlay = $('#errorReportOverlay');
+const errorReportBody = $('#errorReportBody');
+const errorReportClose = $('#errorReportClose');
+const errorReportDismiss = $('#errorReportDismiss');
+
 // Form fields
 const fields = {
   fuelEconomy: $('#fuelEconomy'),
@@ -80,6 +86,10 @@ newTripBtn.addEventListener('click', handleNewTrip);
 skipBtn.addEventListener('click', () => {
   transitionToReview(null);
 });
+
+// Error report dismiss
+errorReportClose.addEventListener('click', () => errorReportOverlay.classList.add('hidden'));
+errorReportDismiss.addEventListener('click', () => errorReportOverlay.classList.add('hidden'));
 
 // Photo preview toggle
 photoPreviewBar.addEventListener('click', () => {
@@ -481,7 +491,7 @@ async function handleExtract() {
     const result = await extractData(imageBase64, imageMimeType, CONFIG.SCRIPT_URL);
     transitionToReview(result);
   } catch (err) {
-    showToast(err.message, 'error');
+    showErrorReport(err);
   } finally {
     setButtonLoading(extractBtn, extractSpinner, false);
   }
@@ -740,6 +750,71 @@ function formatTime(date) {
   const s = String(date.getSeconds()).padStart(2, '0');
   return `${h}:${m}:${s}`;
 }
+
+// ===== ERROR REPORT =====
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function showErrorReport(error) {
+  let html = '';
+
+  if (error.report) {
+    const r = error.report;
+
+    // Timestamp
+    html += `<div class="error-section">`;
+    html += `<div class="error-label">Timestamp</div>`;
+    html += `<div class="error-value">${escapeHtml(r.timestamp)}</div>`;
+    html += `</div>`;
+
+    // Server attempts
+    html += `<div class="error-section">`;
+    html += `<div class="error-label">🔴 Server (Gemini)</div>`;
+    if (r.server.attempts.length > 0) {
+      r.server.attempts.forEach(a => {
+        html += `<div class="error-attempt">`;
+        html += `<strong>${escapeHtml(a.model)}</strong>: ${escapeHtml(a.error || 'unknown')}`;
+        if (a.rawText) {
+          html += `<pre class="error-raw">${escapeHtml(a.rawText)}</pre>`;
+        }
+        if (a.rawResponse) {
+          html += `<pre class="error-raw">${escapeHtml(a.rawResponse)}</pre>`;
+        }
+        if (a.parsed) {
+          html += `<pre class="error-raw">Parsed: ${escapeHtml(JSON.stringify(a.parsed))}</pre>`;
+        }
+        html += `</div>`;
+      });
+    } else {
+      html += `<div class="error-value">${escapeHtml(r.server.message)}</div>`;
+    }
+    html += `</div>`;
+
+    // OCR
+    html += `<div class="error-section">`;
+    html += `<div class="error-label">🔴 Local OCR (Tesseract)</div>`;
+    html += `<div class="error-value">${escapeHtml(r.ocr.message)}</div>`;
+    if (r.ocr.rawText) {
+      html += `<pre class="error-raw">${escapeHtml(r.ocr.rawText)}</pre>`;
+    }
+    html += `</div>`;
+  } else {
+    // Fallback: no structured report, show raw message
+    html += `<div class="error-section">`;
+    html += `<div class="error-label">Error</div>`;
+    html += `<div class="error-value">${escapeHtml(error.message)}</div>`;
+    html += `</div>`;
+  }
+
+  errorReportBody.innerHTML = html;
+  errorReportOverlay.classList.remove('hidden');
+}
+
+// ===== TOAST =====
 
 let toastTimeout = null;
 function showToast(message, type = 'info') {

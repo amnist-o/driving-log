@@ -269,6 +269,20 @@
     <span id="toastMessage"></span>
   </div>
 
+  <!-- Error Report Overlay (screenshot-friendly) -->
+  <div class="error-report-overlay hidden" id="errorReportOverlay">
+    <div class="error-report-panel">
+      <div class="error-report-header">
+        <h2>⚠ Extraction Failed</h2>
+        <button class="error-report-close" id="errorReportClose">&times;</button>
+      </div>
+      <div class="error-report-body" id="errorReportBody"></div>
+      <div class="error-report-footer">
+        <button class="btn btn-secondary btn-full" id="errorReportDismiss">Dismiss</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>
