@@ -658,19 +658,42 @@ async function handleSubmit() {
   }
 
   try {
-    const response = await fetch(CONFIG.SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) throw new Error(`Server error: ${response.status}`);
+    // Retried because Apps Script fails ~24% of requests on Google's side, not
+    // ours. This is only SAFE because the server now recognises a repeat by
+    // date + arrival time: before that guard existed, a retry after a reply was
+    // lost in transit is exactly what produced the duplicate rows in the sheet.
+    let response, lastErr;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await fetch(CONFIG.SCRIPT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error(`Server error: ${response.status}`);
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        // Offline is not a transport hiccup — stop and let the queue handle it
+        if (!navigator.onLine) break;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+    if (lastErr) throw lastErr;
 
     const result = await response.json();
 
     if (result.error) throw new Error(result.error);
 
-    showSuccess();
+    // Surface a suppressed duplicate rather than pretending a row was written.
+    // A false positive is possible for back-dated photos whose arrival time has
+    // no seconds, so it must not be silent.
+    if (result.duplicate) {
+      showSuccess('✓ Already logged — no duplicate row added');
+    } else {
+      showSuccess();
+    }
   } catch (err) {
     // Network error — save offline
     if (!navigator.onLine || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {

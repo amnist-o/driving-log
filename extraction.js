@@ -60,40 +60,83 @@ export async function extractData(imageBase64, mimeType, scriptUrl) {
 
 // ===== GEMINI ADAPTER =====
 
+/**
+ * Apps Script fails ~24% of heavy image POSTs on Google's side — measured
+ * 2026-09-15: 7 failures in 29 real calls, split between HTTP 404 error pages
+ * and the script's own doGet body coming back because the redirect collapses
+ * POST into GET. None of that is a model problem, and all of it succeeds on a
+ * second try, so one retry takes the failure rate to roughly 6%.
+ *
+ * Only INFRASTRUCTURE failures are retried. A genuine Gemini refusal (quota,
+ * overload, unreadable photo) is returned in the body with an `error` field and
+ * is thrown immediately — the server already tried every model in its list, so
+ * retrying would just spend another 5-20s to be told the same thing.
+ */
 async function geminiAdapter(imageBase64, mimeType, scriptUrl) {
-  const response = await fetch(scriptUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    // Without a limit a stalled backend spins the spinner forever
-    signal: AbortSignal.timeout(45000),
-    body: JSON.stringify({
-      action: 'extract',
-      image: imageBase64,
-      mimeType: mimeType
-    })
-  });
+  const ATTEMPTS = 2;
+  let lastErr;
 
-  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      return await geminiAttempt(imageBase64, mimeType, scriptUrl);
+    } catch (err) {
+      if (!err.retryable) throw err;
+      lastErr = err;
+      if (attempt < ATTEMPTS) await new Promise((r) => setTimeout(r, 800));
+    }
+  }
 
-  const result = await response.json();
+  throw lastErr;
+}
+
+/** One attempt. Marks infrastructure failures `retryable` so the caller knows. */
+async function geminiAttempt(imageBase64, mimeType, scriptUrl) {
+  const infra = (message) => {
+    const err = new Error(message);
+    err.retryable = true;
+    return err;
+  };
+
+  let response;
+  try {
+    response = await fetch(scriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      // Without a limit a stalled backend spins the spinner forever
+      signal: AbortSignal.timeout(45000),
+      body: JSON.stringify({
+        action: 'extract',
+        image: imageBase64,
+        mimeType: mimeType
+      })
+    });
+  } catch (netErr) {
+    // Offline, DNS, or the 45s abort firing
+    throw infra(`Network error: ${netErr.message}`);
+  }
+
+  if (!response.ok) throw infra(`Server error: ${response.status}`);
+
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    // Apps Script served an HTML error page with a 200
+    throw infra('Server returned a non-JSON reply');
+  }
 
   if (result.error) {
     const err = new Error(result.error);
     err.debug = result.debug || null;   // Preserve server diagnostics
-    throw err;
+    throw err;                          // NOT retryable — Gemini genuinely refused
   }
 
-  // A slow POST to Apps Script can come back as its own doGet health-check body
-  // ({"status":"ok","message":"Drive Log API is running"}) because the redirect
-  // collapses POST into GET. Observed repeatedly on 40s+ requests. Without this
-  // check there is no `error` field, so the form silently fills with nothing and
-  // the user is told nothing — which looks exactly like a mystery failure.
+  // The doGet health-check body ({"status":"ok","message":"..."}) arriving in
+  // answer to a POST. No `error` field, so without this the form silently fills
+  // with nothing and the user is told nothing at all.
   if (result.fuel_economy == null && result.distance == null && result.duration == null) {
-    const err = new Error(
-      'Server did not return any values. Raw reply: ' + JSON.stringify(result).slice(0, 140)
-    );
-    err.debug = result.debug || null;
-    throw err;
+    throw infra('Server did not return any values. Raw reply: '
+      + JSON.stringify(result).slice(0, 140));
   }
 
   return {

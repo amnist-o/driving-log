@@ -80,6 +80,38 @@ filled with **nothing and showed no error** — indistinguishable from a mystery
 plausible contributor to the original complaint. `extraction.js` now rejects a reply containing none
 of the three values and reports the raw body. Client-only change; no redeploy needed.
 
+### The real cause of the slowness and errors: Apps Script, ~24% failure rate
+
+Measured today, and this is the most useful number in this file.
+
+- **Real image POSTs: 7 infrastructure failures in 29 calls (~24%).** Split between HTTP 404 (a
+  Google Drive "cannot open file" HTML page, not the script) and the script's own `doGet` body
+  coming back because the redirect collapses POST into GET.
+- **Trivial GET health checks: 1 failure in 15 (~7%).** So the failure rate scales with how slow
+  and heavy the request is, which is why a 60KB photo taking 4–19s fares much worse than a ping.
+
+An earlier note in this session implied "1 in 3" from a 3-request sample; the measured figures
+above supersede that.
+
+**None of this is the model, the prompt, or the token budget.** Ranking the real causes of the
+original complaint:
+
+1. ~1 in 4 heavy requests fails inside Google's Apps Script layer.
+2. Gemini's 3.x models are largely unavailable on this key, and an overloaded one can take 77
+   seconds just to refuse.
+3. Extraction is inherently 4–19 seconds with an image attached.
+4. The `thinkingBudget` theory this session opened with — still unproven, and clearly not the main
+   story.
+
+**Fix applied: retry once.** If failures are independent, ~24% drops to ~6%. Only infrastructure
+failures are retried — a genuine Gemini refusal is thrown straight away, since the server already
+tried every model in its list and a retry would spend another 5–20s to hear the same answer.
+
+Retrying `submit` is only safe *because* the duplicate guard shipped first: before it existed, a
+retry after a lost reply is precisely what produced the duplicate rows. The two changes compound —
+the guard makes the retry safe, and the retry stops the "Submit failed" toast that was prompting
+manual re-taps.
+
 ### Test integrity note
 
 Google's capacity problems left gaps: `2.5-flash` produced valid data on only 3 of 5 photos, and the
@@ -192,13 +224,14 @@ in the app depends on it.
 
 ---
 
-**State now** · Model list confirmed correct and unchanged; lite models tested on real photos and
-rejected on accuracy. A silent-blank-form bug found and fixed in `extraction.js`. Backend live at
-deployment `@9`.
+**State now** · **v1.2.0.** Model list confirmed correct and unchanged; lite models tested on real
+photos and rejected on accuracy. Apps Script measured at ~24% failure on image POSTs, now retried
+once. Silent-blank-form bug fixed. Duplicate suppression is now visible to the user instead of
+silent. Backend live at deployment `@9`; front-end on GitHub Pages.
 
-**Next action** · Nothing outstanding. Next time extraction fails, open the error report and check
-whether it names `MAX_TOKENS` — that still decides whether the `thinkingBudget` fix addressed the
-intermittent failures.
+**Next action** · Log a few real trips and see whether failures have dropped noticeably. If a
+failure still occurs, open the error report and check whether it names `MAX_TOKENS` — that still
+decides whether the `thinkingBudget` fix addressed the intermittent failures.
 
 **Waiting on / open questions** · (a) Whether `thinkingBudget: 0` cured the intermittent errors —
 unproven, needs a real failure to inspect. (b) Whether to make Tesseract manual, given the
