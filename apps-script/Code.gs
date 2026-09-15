@@ -81,7 +81,9 @@ function handleExtract(data) {
               + 'Read the PROMINENT DISPLAYED VALUES on the screen — NOT chart axis labels, scale markers, or decorative numbers.\n\n'
               + 'Extract these three values:\n'
               + '- fuel_economy: the large number associated with "This Drive" or a similar per-trip heading, in km/L (float). '
-              + 'Valid range is 0–35 km/L. A value of 0 is valid (e.g. EV mode or engine-off coasting).\n'
+              + 'Short city trips legitimately read as low as 2 km/L; the highest plausible value is about 25. '
+              + 'A value that exactly matches a round chart-axis number (10, 20, 30) is almost certainly an '
+              + 'axis label rather than the reading — prefer the large value under the per-trip heading.\n'
               + '- distance: Driving Distance in km (float).\n'
               + '- duration: Driving Time in minutes (integer). If shown as "Xh Ym", convert to total minutes.\n\n'
               + 'For each value, also provide a confidence score between 0.0 (guess) and 1.0 (certain).\n\n'
@@ -100,7 +102,13 @@ function handleExtract(data) {
       generationConfig: {
         temperature: 0,
         maxOutputTokens: 500,
-        responseMimeType: 'application/json'
+        responseMimeType: 'application/json',
+        // Reading three numbers off a screen needs no internal reasoning, and
+        // thinking tokens are charged against maxOutputTokens. Left on, the model
+        // can spend the whole 500 thinking and return a candidate with no text —
+        // which surfaces as "No usable response from AI" on a photo that would
+        // otherwise read fine, i.e. intermittent and photo-dependent.
+        thinkingConfig: { thinkingBudget: 0 }
       }
     };
 
@@ -119,7 +127,7 @@ function handleExtract(data) {
     } catch (fetchErr) {
       attempt.error = 'Fetch failed: ' + fetchErr.message;
       attempts.push(attempt);
-      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      if (m < models.length - 1) { continue; }
       return jsonResponse({ error: 'All models failed (network)', debug: { attempts: attempts } });
     }
 
@@ -127,7 +135,7 @@ function handleExtract(data) {
     if (result.error) {
       attempt.error = result.error.message || JSON.stringify(result.error);
       attempts.push(attempt);
-      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      if (m < models.length - 1) { continue; }
       return jsonResponse({ error: attempt.error, debug: { attempts: attempts } });
     }
 
@@ -140,7 +148,7 @@ function handleExtract(data) {
       attempt.error = 'Malformed response — no candidates';
       attempt.rawResponse = JSON.stringify(result).substring(0, 300);
       attempts.push(attempt);
-      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      if (m < models.length - 1) { continue; }
       return jsonResponse({ error: 'No usable response from AI', debug: { attempts: attempts } });
     }
 
@@ -166,7 +174,7 @@ function handleExtract(data) {
       if (!jsonStr) {
         attempt.error = 'Could not find valid JSON in response';
         attempts.push(attempt);
-        if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+        if (m < models.length - 1) { continue; }
         return jsonResponse({ error: 'Could not parse AI response', debug: { attempts: attempts } });
       }
       try {
@@ -174,7 +182,7 @@ function handleExtract(data) {
       } catch (e2) {
         attempt.error = 'Extracted JSON still invalid: ' + e2.message;
         attempts.push(attempt);
-        if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+        if (m < models.length - 1) { continue; }
         return jsonResponse({ error: 'Invalid JSON in AI response', debug: { attempts: attempts } });
       }
     }
@@ -187,7 +195,7 @@ function handleExtract(data) {
       attempt.error = 'Only extracted ' + fieldCount + '/3 fields';
       attempt.parsed = extracted;
       attempts.push(attempt);
-      if (m < models.length - 1) { Utilities.sleep(1000); continue; }
+      if (m < models.length - 1) { continue; }
       return jsonResponse({
         error: 'AI could only extract ' + fieldCount + ' of 3 fields',
         debug: { attempts: attempts }
@@ -205,6 +213,19 @@ function handleExtract(data) {
  * Append a row to the Google Sheet
  */
 function handleSubmit(data) {
+  // ponytail: 6h cache guard. Same date + arrival second = same trip, so a retry
+  // after a lost reply is ignored instead of appending a second row. The phone
+  // retrying is CORRECT (it cannot tell whether the row landed) — the defect was
+  // that the server could not recognise a repeat. Both writers (submit button and
+  // offline queue) route through this action, so one guard here covers both.
+  // Ceiling: CacheService max TTL is 6h — an offline trip that syncs later than
+  // that can still duplicate. Upgrade to scanning the last 50 rows if that happens.
+  const dupKey = 'trip:' + data.date + 'T' + data.arrivalTime;
+  const cache = CacheService.getScriptCache();
+  if (cache.get(dupKey)) {
+    return jsonResponse({ status: 'ok', duplicate: true });
+  }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = getSheetByGid(ss, SHEET_GID);
 
@@ -234,6 +255,10 @@ function handleSubmit(data) {
   ];
 
   sheet.appendRow(row);
+
+  // Mark AFTER a successful append, so the guard can only ever block a trip that
+  // genuinely made it into the sheet.
+  cache.put(dupKey, '1', 21600);
 
   return jsonResponse({ status: 'ok', row: row });
 }

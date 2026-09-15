@@ -64,6 +64,8 @@ async function geminiAdapter(imageBase64, mimeType, scriptUrl) {
   const response = await fetch(scriptUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    // Without a limit a stalled backend spins the spinner forever
+    signal: AbortSignal.timeout(45000),
     body: JSON.stringify({
       action: 'extract',
       image: imageBase64,

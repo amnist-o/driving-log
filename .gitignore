@@ -1,0 +1,2 @@
+# clasp OAuth tokens — NEVER commit these. This repo is public.
+.clasprc.json
