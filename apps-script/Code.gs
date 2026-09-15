@@ -33,6 +33,17 @@ const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite']
 // not cost a slow failure on every single trip. An overloaded model can take
 // over a minute just to say no (measured: 77s), and UrlFetchApp has no timeout
 // setting, so avoiding a known-bad model is the only lever available.
+// Models the public endpoint will accept as a one-off `model` override, for
+// comparing candidates against a real dashboard photo. Whitelisted so a public
+// endpoint cannot be talked into spending the owner's quota on any model.
+const TESTABLE_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite'
+];
+
 const LAST_GOOD_KEY = 'lastGoodModel';
 const LAST_GOOD_TTL_MS = 6 * 60 * 60 * 1000;   // after this, re-probe MODELS[0]
 const LAST_GOOD_REFRESH_MS = 3 * 60 * 60 * 1000; // re-stamp a still-winning model
@@ -119,7 +130,17 @@ function handleExtract(data) {
   // Try last-known-good first, then the measured preference order
   const props = PropertiesService.getScriptProperties();
   const storedGood = props.getProperty(LAST_GOOD_KEY);
-  const models = getModelOrder(storedGood, Date.now());
+
+  // Optional single-model override, for A/B testing one model against a real
+  // photo (see the comparison workflow in STATUS.md). Whitelisted: this endpoint
+  // is public, so an arbitrary model name here would let anyone spend the
+  // owner's API quota on a model of their choosing. No fallback when overriding,
+  // so a test result is unambiguously about the model asked for.
+  const override = data.model && TESTABLE_MODELS.indexOf(data.model) !== -1
+    ? data.model
+    : null;
+
+  const models = override ? [override] : getModelOrder(storedGood, Date.now());
   var attempts = [];
 
   for (var m = 0; m < models.length; m++) {
@@ -257,11 +278,13 @@ function handleExtract(data) {
       });
     }
 
-    // Success — remember this model so the next trip starts here
+    // Success — remember this model so the next trip starts here.
+    // Never record during an override: a test run must not repoint real logging.
     const now = Date.now();
-    if (shouldRecordModel(storedGood, model, now)) {
+    if (!override && shouldRecordModel(storedGood, model, now)) {
       props.setProperty(LAST_GOOD_KEY, model + '|' + now);
     }
+    if (override) extracted._model = model; // so a comparison run is self-labelling
     return jsonResponse(extracted);
   }
 
