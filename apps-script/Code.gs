@@ -307,3 +307,47 @@ function jsonResponse(obj) {
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+// ===== ONE-OFF EDITOR CHECKS (not used by the web app) =====
+
+/**
+ * Print the flash models this API key can actually serve, newest first.
+ * Run from the editor (Run > listModels), then reorder the `models` list in
+ * handleExtract to match. Do NOT guess model names — a name Google does not
+ * serve costs a wasted round trip on every single extraction.
+ */
+function listModels() {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) {
+    Logger.log('GEMINI_API_KEY not set in Script Properties');
+    return;
+  }
+
+  const response = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models?key=' + apiKey,
+    { muteHttpExceptions: true }
+  );
+
+  const body = JSON.parse(response.getContentText());
+
+  if (body.error) {
+    Logger.log('API error: ' + (body.error.message || JSON.stringify(body.error)));
+    return;
+  }
+  if (!body.models || !body.models.length) {
+    Logger.log('No models returned. Raw response: '
+      + response.getContentText().substring(0, 300));
+    return;
+  }
+
+  // Only models that can actually take an image and return text are usable here
+  const usable = body.models.filter(function (m) {
+    const methods = m.supportedGenerationMethods || [];
+    return m.name.indexOf('flash') !== -1 && methods.indexOf('generateContent') !== -1;
+  });
+
+  Logger.log(usable.length + ' usable flash model(s) of ' + body.models.length + ' total:');
+  usable.forEach(function (m) {
+    Logger.log('  ' + m.name.replace('models/', ''));
+  });
+}
