@@ -351,3 +351,85 @@ function listModels() {
     Logger.log('  ' + m.name.replace('models/', ''));
   });
 }
+
+/**
+ * Ping each candidate model with the SAME generationConfig the app uses, and
+ * report which ones accept it and how fast they answer.
+ *
+ * The point is thinkingConfig: Gemini 3.x changed how thinking is configured,
+ * so a newer model might reject `thinkingBudget` outright. Putting such a model
+ * first would make every extraction fail on attempt one and fall through —
+ * slower, not faster. Measure before reordering.
+ *
+ * Sends 6 tiny text-only requests. Negligible cost, no image involved.
+ */
+function testModels() {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) {
+    Logger.log('GEMINI_API_KEY not set in Script Properties');
+    return;
+  }
+
+  // Newest first — the order we'd WANT, if each one works
+  const candidates = [
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-2.5-flash',
+    'gemini-flash-latest'
+  ];
+
+  const passed = [];
+
+  candidates.forEach(function (model) {
+    const payload = {
+      contents: [{ parts: [{ text: 'Reply with only this JSON: {"ok":1}' }] }],
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens: 500,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 }
+      }
+    };
+
+    const started = Date.now();
+    const response = UrlFetchApp.fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/' + model
+        + ':generateContent?key=' + apiKey,
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      }
+    );
+    const ms = Date.now() - started;
+    const body = JSON.parse(response.getContentText());
+
+    if (body.error) {
+      Logger.log(model + ' — REJECTED: ' + (body.error.message || '?'));
+      return;
+    }
+
+    const cand = body.candidates && body.candidates[0];
+    const text = cand && cand.content && cand.content.parts
+      && cand.content.parts[0] && cand.content.parts[0].text;
+
+    if (!text) {
+      Logger.log(model + ' — empty reply, finishReason: ' + (cand && cand.finishReason));
+      return;
+    }
+
+    Logger.log(model + ' — OK, ' + ms + 'ms');
+    passed.push(model);
+  });
+
+  Logger.log('');
+  if (!passed.length) {
+    Logger.log('Nothing accepted the config — keep the current model list.');
+    return;
+  }
+  Logger.log('Paste this into handleExtract:');
+  Logger.log("  const models = ['" + passed.slice(0, 3).join("', '") + "'];");
+}
