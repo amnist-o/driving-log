@@ -23,6 +23,59 @@
 // ===== CONFIGURATION =====
 const SHEET_GID = 353772877; // Your sheet tab's gid
 
+// Preference order: FASTEST FIRST, measured by testModels(), not newest-first.
+// Measured 2026-09-15: 2.5-flash 393ms; 3.5-flash 9708ms; 3.6/3.7/3.8/flash-latest
+// all rejected with "high demand" on this key. Newer is NOT better here.
+// Re-run testModels() and reorder if extraction starts feeling slow.
+const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+
+// Self-healing: remember which model last worked so a model that is down does
+// not cost a slow failure on every single trip. An overloaded model can take
+// over a minute just to say no (measured: 77s), and UrlFetchApp has no timeout
+// setting, so avoiding a known-bad model is the only lever available.
+const LAST_GOOD_KEY = 'lastGoodModel';
+const LAST_GOOD_TTL_MS = 6 * 60 * 60 * 1000;   // after this, re-probe MODELS[0]
+const LAST_GOOD_REFRESH_MS = 3 * 60 * 60 * 1000; // re-stamp a still-winning model
+
+/**
+ * Build the order to try models in: last known good first (if fresh and known),
+ * then the measured preference order, deduplicated.
+ *
+ * Pure function of its inputs so it can be tested — see testModelOrder().
+ *
+ * @param {string|null} stored - raw property value, "model|timestampMs"
+ * @param {number} nowMs
+ * @returns {string[]}
+ */
+function getModelOrder(stored, nowMs) {
+  const preferred = MODELS.slice();
+  if (!stored) return preferred;
+
+  const parts = String(stored).split('|');
+  const model = parts[0];
+  const at = parseInt(parts[1], 10);
+
+  if (!model || !at || isNaN(at)) return preferred;      // malformed
+  if (nowMs - at > LAST_GOOD_TTL_MS) return preferred;   // stale: re-probe the fast one
+  if (preferred.indexOf(model) === -1) return preferred; // not a model we know
+
+  return [model].concat(preferred.filter(function (m) { return m !== model; }));
+}
+
+/**
+ * Should we write the winning model back? Avoids a property write on every
+ * single extraction while keeping the stamp fresh enough that a persistently
+ * down primary is not retried on every trip.
+ */
+function shouldRecordModel(stored, model, nowMs) {
+  if (!stored) return true;
+  const parts = String(stored).split('|');
+  if (parts[0] !== model) return true;
+  const at = parseInt(parts[1], 10);
+  if (!at || isNaN(at)) return true;
+  return (nowMs - at) > LAST_GOOD_REFRESH_MS;
+}
+
 /**
  * Handle GET requests (just a health check)
  */
@@ -63,8 +116,10 @@ function handleExtract(data) {
     return jsonResponse({ error: 'GEMINI_API_KEY not set in Script Properties' });
   }
 
-  // Try models in order — fallback if one fails (quota, deprecation, etc.)
-  const models = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+  // Try last-known-good first, then the measured preference order
+  const props = PropertiesService.getScriptProperties();
+  const storedGood = props.getProperty(LAST_GOOD_KEY);
+  const models = getModelOrder(storedGood, Date.now());
   var attempts = [];
 
   for (var m = 0; m < models.length; m++) {
@@ -202,7 +257,11 @@ function handleExtract(data) {
       });
     }
 
-    // Success
+    // Success — remember this model so the next trip starts here
+    const now = Date.now();
+    if (shouldRecordModel(storedGood, model, now)) {
+      props.setProperty(LAST_GOOD_KEY, model + '|' + now);
+    }
     return jsonResponse(extracted);
   }
 
@@ -353,6 +412,40 @@ function listModels() {
 }
 
 /**
+ * Self-check for getModelOrder / shouldRecordModel. Pure logic, no API calls,
+ * no sheet access. Expect "PASS" in the execution log.
+ */
+function testModelOrder() {
+  const H = 60 * 60 * 1000;
+  const now = Date.now();
+  const same = function (a, b) { return JSON.stringify(a) === JSON.stringify(b); };
+  const check = function (cond, label) {
+    if (!cond) throw new Error('FAIL: ' + label);
+  };
+
+  check(same(getModelOrder(null, now), MODELS), 'no stored value -> preference order');
+  check(same(getModelOrder('gemini-3.5-flash|' + (now - H), now),
+    ['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-3.1-flash-lite']),
+    'fresh non-primary is promoted');
+  check(same(getModelOrder('gemini-3.5-flash|' + (now - 7 * H), now), MODELS),
+    'stale entry reverts to preference');
+  check(same(getModelOrder('gemini-9.9-imaginary|' + (now - H), now), MODELS),
+    'unknown model name ignored');
+  check(same(getModelOrder('nonsense', now), MODELS), 'malformed value ignored');
+  check(getModelOrder('junk', now).length === MODELS.length, 'no fallback lost');
+
+  check(shouldRecordModel(null, 'gemini-2.5-flash', now), 'first write happens');
+  check(!shouldRecordModel('gemini-2.5-flash|' + (now - H), 'gemini-2.5-flash', now),
+    'no pointless rewrite of a fresh identical winner');
+  check(shouldRecordModel('gemini-2.5-flash|' + (now - 4 * H), 'gemini-2.5-flash', now),
+    'aging stamp gets refreshed');
+
+  Logger.log('PASS: model order logic behaves correctly');
+  Logger.log('Current stored value: '
+    + (PropertiesService.getScriptProperties().getProperty(LAST_GOOD_KEY) || '(none yet)'));
+}
+
+/**
  * Ping each candidate model with the SAME generationConfig the app uses, and
  * report which ones accept it and how fast they answer.
  *
@@ -422,14 +515,27 @@ function testModels() {
     }
 
     Logger.log(model + ' — OK, ' + ms + 'ms');
-    passed.push(model);
+    passed.push({ model: model, ms: ms });
   });
 
   Logger.log('');
   if (!passed.length) {
-    Logger.log('Nothing accepted the config — keep the current model list.');
+    Logger.log('Nothing accepted the config — keep the current MODELS list.');
     return;
   }
-  Logger.log('Paste this into handleExtract:');
-  Logger.log("  const models = ['" + passed.slice(0, 3).join("', '") + "'];");
+
+  // Sort by SPEED, not recency. Newest-first was actively wrong here: the 3.x
+  // models are largely unavailable on this key, and 3.5-flash answered 25x
+  // slower than 2.5-flash.
+  passed.sort(function (a, b) { return a.ms - b.ms; });
+
+  Logger.log('Fastest first:');
+  passed.forEach(function (p) { Logger.log('  ' + p.model + '  ' + p.ms + 'ms'); });
+  Logger.log('');
+  Logger.log('Replace the MODELS constant at the top of this file with:');
+  Logger.log("  const MODELS = ['"
+    + passed.slice(0, 3).map(function (p) { return p.model; }).join("', '") + "'];");
+  Logger.log('');
+  Logger.log('Latency here is one sample on a trivial text prompt — treat only');
+  Logger.log('large gaps as real, and note it does NOT test photo accuracy.');
 }
