@@ -1,2 +1,5 @@
 # clasp OAuth tokens — NEVER commit these. This repo is public.
 .clasprc.json
+
+# Test photos — dashboard images stay local. This repo is public.
+test-sample/

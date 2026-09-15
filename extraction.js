@@ -83,6 +83,19 @@ async function geminiAdapter(imageBase64, mimeType, scriptUrl) {
     throw err;
   }
 
+  // A slow POST to Apps Script can come back as its own doGet health-check body
+  // ({"status":"ok","message":"Drive Log API is running"}) because the redirect
+  // collapses POST into GET. Observed repeatedly on 40s+ requests. Without this
+  // check there is no `error` field, so the form silently fills with nothing and
+  // the user is told nothing — which looks exactly like a mystery failure.
+  if (result.fuel_economy == null && result.distance == null && result.duration == null) {
+    const err = new Error(
+      'Server did not return any values. Raw reply: ' + JSON.stringify(result).slice(0, 140)
+    );
+    err.debug = result.debug || null;
+    throw err;
+  }
+
   return {
     values: {
       fuel_economy: result.fuel_economy ?? null,
