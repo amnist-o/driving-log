@@ -47,13 +47,17 @@ Executions page (kept ≈ a week).
 
 Done screen now says "Trip Saved on Phone — not in the spreadsheet yet" when a trip is queued.
 
-**State now** · App v1.3.0 committed (`db1b339`) and live on GitHub Pages. **Google script NOT yet
-redeployed** — clasp is not installed on this laptop (it was set up on another machine). The new
-app works with the old script; only `serverMs` and the queued 50-row duplicate check are missing.
-**Next action** · Redeploy `Code.gs` (clasp from the other machine, or install clasp here, or paste
-into the Apps Script editor and edit the existing deployment to a new version — keep the same URL).
-**Waiting on / open questions** · Owner's choice of redeploy route. After a week or two of use, read
-the diary for a pattern (e.g. slow first request after multi-day gaps).
+**Deployed.** clasp 3.4.1 installed on this laptop and signed in. Script live at deployment `@11`
+(same URL); a live `lastDestination` call returned `serverMs: 1326`. Gotcha: in clasp 3.x a plain
+`clasp push` printed "Skipping push." and uploaded nothing (it wants to confirm overwriting the
+manifest and cannot ask here); the remote manifest only differed in line endings, so `clasp push
+--force` was used. Always confirm with a live call that the reply has `serverMs`.
+
+**State now** · v1.3.0 fully live: app on GitHub Pages, script `@11`.
+**Next action** · Use normally. When something is odd: 🩺 → Copy details → paste to the AI helper.
+**Waiting on / open questions** · The queued 50-row duplicate check is untested live (a test would
+risk writing a row to the real sheet). After a week or two, read the diary for a pattern (e.g. slow
+first request after multi-day gaps).
 
 ---
 
