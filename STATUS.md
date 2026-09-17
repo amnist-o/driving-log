@@ -4,6 +4,56 @@ Running log. Newest entry at the top. Old entries are the project's history — 
 
 ---
 
+## 2026-09-17 — v1.3.0: submit time limit, send-later on timeout, phone diary
+
+### Why
+Submit sometimes hung over a minute, then showed a 4-second "Submit failed" line; retries looked
+frozen; yet the row was in the sheet. Nothing was recorded, so it could not be diagnosed. Likely
+cause: no time limit on the submit request, and iPhone's "Load failed" wording was not recognised as
+a lost connection (only Chrome/Firefox wording was), so the trip was not queued. v1.2.0's retry could
+double the wait.
+
+Owner's priorities: **no noticeable slowdown, no extra cost.** Usage checked from the sheet: 2–5 trips
+a day, frequent 3–6-day gaps — so Google's Executions page (≈1 week history) is not enough on its own,
+and the 6h duplicate memory can be outlived by a queued trip.
+
+### What changed
+- **Phone diary** (`diary.js`): last 300 events in the home-screen app's own storage, never sent
+  anywhere. 🩺 button in the header → view / **Copy details** / Clear. Records app open, photo
+  reading time + source, last-destination time (≈ Google cold start), each submit try with phone
+  time, Google's time (`serverMs`) and exact error, queueing and sync results. Error panels' Copy
+  also appends the diary.
+- **Submit**: 25 s limit per try. Timeout or lost connection (judged by error type, so iPhone works)
+  → no retry, trip goes to the send-later queue, Done screen says "Saved on phone — will sync
+  automatically", background sync tried again after 30 s. Quick Google error → one retry, then the
+  error panel (stays on screen, copyable). A reply without `row`/`duplicate` (the doGet body Apps
+  Script sometimes returns) is now treated as a failure, not success.
+- **Queue sync**: also runs when switching back to the app; guarded so only one sync runs at a time;
+  25 s limit; sends `fromQueue: true`.
+- **Code.gs**: every reply carries `serverMs`; one `console.log` per request (action, request id,
+  ms) visible on the Executions page; for `fromQueue` trips only, also checks the last 50 rows for
+  the same date + arrival time before appending (normal submits don't pay for this read).
+
+### Checked
+In the browser with the network faked (nothing sent to the sheet): instant "Load failed" → queued,
+1 request; Google 500 twice → 2 tries then error panel with Copy; doGet body then success → retried
+and succeeded; never-answering request → queued at 25.0 s; background sync sent `fromQueue` + id and
+cleared the queue; two sync triggers at once → 1 request; header fits at phone width.
+Not yet checked live: `serverMs`, the log line, and the 50-row duplicate check (need deploy).
+
+### How to use when something goes wrong
+Tap 🩺 → Copy details → paste to the AI helper. Matching request ids appear on the Apps Script
+Executions page (kept ≈ a week).
+
+**State now** · v1.3.0 built and tested locally; not committed or deployed.
+**Next action** · `clasp push && clasp redeploy <live id> -d "v1.3.0 timing + queued dup check"`,
+then commit + push to GitHub Pages; fully close and reopen the home-screen app.
+**Waiting on / open questions** · Owner's go-ahead to deploy. After a week or two of use, read the
+diary for a pattern (e.g. slow first request after multi-day gaps). Done screen still says "saved to
+the spreadsheet" even when queued (older wording, not changed).
+
+---
+
 ## 2026-09-15 (later) — Lite models tested on real photos and rejected; design summary
 
 ### Why

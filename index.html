@@ -27,7 +27,8 @@
         <path d="M2 12l10 5 10-5"/>
       </svg>
       <span>Drive Log</span>
-      <span class="version-badge" id="versionBadge">v1.2.0</span>
+      <span class="version-badge" id="versionBadge">v1.3.0</span>
+      <button class="diag-btn" id="diagBtn" type="button" title="Diagnostics" aria-label="Diagnostics">🩺</button>
     </div>
     <div class="sync-badge hidden" id="syncBadge" title="Pending trips">
       <span id="syncCount">0</span>
@@ -252,8 +253,8 @@
             <polyline points="20 6 9 17 4 12"/>
           </svg>
         </div>
-        <h1>Trip Logged!</h1>
-        <p class="subtitle">Your driving data has been saved to the spreadsheet.</p>
+        <h1 id="doneTitle">Trip Logged!</h1>
+        <p class="subtitle" id="doneSubtitle">Your driving data has been saved to the spreadsheet.</p>
         <div class="success-summary" id="successSummary"></div>
         <button class="btn btn-primary btn-full" id="newTripBtn">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -274,11 +275,13 @@
   <div class="error-report-overlay hidden" id="errorReportOverlay">
     <div class="error-report-panel">
       <div class="error-report-header">
-        <h2>⚠ Extraction Failed</h2>
+        <h2 id="errorReportTitle">⚠ Extraction Failed</h2>
         <button class="error-report-close" id="errorReportClose">&times;</button>
       </div>
       <div class="error-report-body" id="errorReportBody"></div>
       <div class="error-report-footer">
+        <button class="btn btn-secondary btn-full hidden" id="errorReportCopy">Copy details</button>
+        <button class="btn btn-secondary btn-full hidden" id="errorReportClear">Clear diary</button>
         <button class="btn btn-secondary btn-full" id="errorReportDismiss">Dismiss</button>
       </div>
     </div>

@@ -99,9 +99,16 @@ function doGet(e) {
 /**
  * Handle POST requests
  */
+// Set at the top of doPost so every reply can say how long Google took
+let requestStartedAt = 0;
+let requestLabel = '';
+
 function doPost(e) {
+  requestStartedAt = Date.now();
   try {
     const data = JSON.parse(e.postData.contents);
+    // Shown on the Executions page, matching the phone diary's request id
+    requestLabel = (data.action || '?') + ' id=' + (data.requestId || '-') + (data.fromQueue ? ' queued' : '');
 
     if (data.action === 'extract') {
       return handleExtract(data);
@@ -315,6 +322,14 @@ function handleSubmit(data) {
     return jsonResponse({ error: 'Sheet with gid ' + SHEET_GID + ' not found' });
   }
 
+  // Past the 6h cache: a queued trip can arrive days after its first attempt
+  // actually landed. Only queued trips pay for this read, so normal submits
+  // stay as fast as before.
+  if (data.fromQueue && tripInRecentRows(ss, sheet, data.date, data.arrivalTime)) {
+    cache.put(dupKey, '1', 21600);
+    return jsonResponse({ status: 'ok', duplicate: true });
+  }
+
   // Create a proper Date object so Sheets recognizes it as a date (not text)
   const dateParts = data.date.split('-');
   const dateObj = new Date(
@@ -369,6 +384,29 @@ function handleLastDestination() {
 }
 
 /**
+ * True if one of the last 50 rows has this date (yyyy-MM-dd) and arrival time
+ * (HH:mm:ss). The sheet shows times like 8:59:30, so hours are padded first.
+ */
+function tripInRecentRows(ss, sheet, date, arrivalTime) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return false;
+  const first = Math.max(2, lastRow - 49);
+  const n = lastRow - first + 1;
+  const dates = sheet.getRange(first, 1, n, 1).getValues();
+  const times = sheet.getRange(first, 2, n, 1).getDisplayValues();
+  const tz = ss.getSpreadsheetTimeZone();
+  const pad = (t) => String(t).trim().replace(/^(\d):/, '0$1:');
+  for (let i = 0; i < n; i++) {
+    const d = dates[i][0];
+    if (!(d instanceof Date)) continue;
+    if (Utilities.formatDate(d, tz, 'yyyy-MM-dd') === date && pad(times[i][0]) === pad(arrivalTime)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Find a sheet by its gid
  */
 function getSheetByGid(spreadsheet, gid) {
@@ -385,6 +423,10 @@ function getSheetByGid(spreadsheet, gid) {
  * Helper to return JSON response
  */
 function jsonResponse(obj) {
+  if (requestStartedAt) {
+    obj.serverMs = Date.now() - requestStartedAt;
+    console.log(requestLabel + ' ' + obj.serverMs + 'ms' + (obj.error ? ' error=' + obj.error : '') + (obj.duplicate ? ' duplicate' : ''));
+  }
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);

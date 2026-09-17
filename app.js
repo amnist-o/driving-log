@@ -3,6 +3,12 @@
    ========================================== */
 
 import { extractData } from './extraction.js';
+import { logEvent, getDiaryText, clearDiary, newRequestId } from './diary.js';
+
+const APP_VERSION = 'v1.3.0';
+// Past this the phone gives up and queues the trip. Long enough to cover Apps
+// Script's slow start after days of no use, short enough not to feel frozen.
+const SUBMIT_TIMEOUT_MS = 25000;
 
 // ===== CONFIGURATION =====
 // After deploying the Apps Script, paste the web app URL here:
@@ -60,6 +66,10 @@ const errorReportOverlay = $('#errorReportOverlay');
 const errorReportBody = $('#errorReportBody');
 const errorReportClose = $('#errorReportClose');
 const errorReportDismiss = $('#errorReportDismiss');
+const errorReportTitle = $('#errorReportTitle');
+const errorReportCopy = $('#errorReportCopy');
+const errorReportClear = $('#errorReportClear');
+const diagBtn = $('#diagBtn');
 
 // Form fields
 const fields = {
@@ -90,6 +100,12 @@ skipBtn.addEventListener('click', () => {
 // Error report dismiss
 errorReportClose.addEventListener('click', () => errorReportOverlay.classList.add('hidden'));
 errorReportDismiss.addEventListener('click', () => errorReportOverlay.classList.add('hidden'));
+errorReportCopy.addEventListener('click', copyReportText);
+errorReportClear.addEventListener('click', () => {
+  clearDiary();
+  showDiagnostics();
+});
+diagBtn.addEventListener('click', showDiagnostics);
 
 // Photo preview toggle
 photoPreviewBar.addEventListener('click', () => {
@@ -120,8 +136,13 @@ closePanelBtn.addEventListener('click', () => {
 
 // Auto-sync when coming back online
 window.addEventListener('online', syncPendingTrips);
+// A home-screen app is usually resumed, not reloaded, so also sync on return
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && navigator.onLine) syncPendingTrips();
+});
 
 // ===== INITIALIZATION =====
+logEvent('app-open', { version: APP_VERSION, online: navigator.onLine });
 // Load cached lastDestination immediately (works offline)
 const cachedDest = localStorage.getItem('lastDestination');
 if (cachedDest) {
@@ -486,12 +507,16 @@ async function handleExtract() {
   }
 
   setButtonLoading(extractBtn, extractSpinner, true);
+  const started = Date.now();
+  logEvent('extract-start', { kb: Math.round(imageBase64.length * 0.75 / 1024) });
 
   try {
     const result = await extractData(imageBase64, imageMimeType, CONFIG.SCRIPT_URL);
+    logEvent('extract-ok', { ms: Date.now() - started, source: result.source });
     transitionToReview(result);
   } catch (err) {
-    showErrorReport(err);
+    logEvent('extract-fail', { ms: Date.now() - started, error: err.message });
+    showErrorReport(err, '⚠ Extraction Failed');
   } finally {
     setButtonLoading(extractBtn, extractSpinner, false);
   }
@@ -501,23 +526,65 @@ async function handleExtract() {
 async function fetchLastDestination() {
   if (!CONFIG.SCRIPT_URL) return;
 
+  // Usually the first request after days of no use, so its time shows how slow
+  // Google's cold start is
+  const id = newRequestId();
+  const started = Date.now();
   try {
-    const response = await fetch(CONFIG.SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'lastDestination' })
-    });
-
-    if (!response.ok) return;
-
-    const result = await response.json();
+    const { result, serverMs } = await postToScript({ action: 'lastDestination', requestId: id });
+    logEvent('last-dest-ok', { id, ms: Date.now() - started, serverMs });
     if (result.lastDestination) {
       cachedLastDestination = result.lastDestination;
       localStorage.setItem('lastDestination', result.lastDestination);
     }
-  } catch {
-    // Silent fail — we already have the localStorage cache
+  } catch (err) {
+    // Silent for the user — we already have the localStorage cache
+    logEvent('last-dest-fail', { id, ms: Date.now() - started, error: describeError(err) });
   }
+}
+
+// ===== NETWORK HELPERS =====
+
+/**
+ * POST to the Apps Script with a time limit. Resolves { result, serverMs };
+ * throws on timeout, lost connection, HTTP error, or a non-JSON reply.
+ */
+async function postToScript(payload) {
+  const response = await fetch(CONFIG.SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error('Server returned a non-JSON reply');
+  }
+  return { result, serverMs: result.serverMs };
+}
+
+/**
+ * Timeout or lost connection: the request may or may not have reached Google.
+ * Judged by error type, not wording — iPhone says "Load failed", Chrome says
+ * "Failed to fetch", Firefox "NetworkError", and all of them are TypeErrors.
+ */
+function isConnectionError(err) {
+  return err.name === 'TimeoutError' || err.name === 'AbortError' || err.name === 'TypeError';
+}
+
+function describeError(err) {
+  return err.name === 'TimeoutError' || err.name === 'AbortError'
+    ? `timed out after ${SUBMIT_TIMEOUT_MS / 1000}s`
+    : `${err.name}: ${err.message}`;
+}
+
+// A real submit reply has `row` or `duplicate`. Apps Script sometimes answers a
+// POST with the doGet "API is running" body instead — that wrote nothing.
+function isSubmitReply(result) {
+  return Boolean(result && (result.row || result.duplicate));
 }
 
 // ===== OFFLINE SUBMISSION QUEUE =====
@@ -567,36 +634,42 @@ function renderPendingPanel() {
   `).join('');
 }
 
+let syncing = false;
 async function syncPendingTrips() {
+  // Load, 'online' and returning to the app can fire together
+  if (syncing) return;
   const pending = getPendingTrips();
   if (pending.length === 0) return;
+  syncing = true;
 
   let synced = 0;
-  const remaining = [];
+  const sent = new Set();
 
-  for (const trip of pending) {
-    try {
+  try {
+    for (const trip of pending) {
       const { queuedAt, ...payload } = trip;
-      const response = await fetch(CONFIG.SCRIPT_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload)
-      });
-      if (response.ok) {
-        const result = await response.json();
-        if (!result.error) {
-          synced++;
-          continue;
-        }
+      const id = newRequestId();
+      const started = Date.now();
+      try {
+        // fromQueue: the server also checks recent rows, because a trip queued
+        // after a lost reply may already be in the sheet from days ago
+        const { result, serverMs } = await postToScript({ ...payload, fromQueue: true, requestId: id });
+        if (result.error) throw new Error(result.error);
+        if (!isSubmitReply(result)) throw new Error('Unexpected server reply');
+        logEvent('sync-ok', { id, trip: `${trip.date}T${trip.arrivalTime}`, ms: Date.now() - started, serverMs, duplicate: Boolean(result.duplicate) });
+        sent.add(queuedAt);
+        synced++;
+      } catch (err) {
+        logEvent('sync-fail', { id, trip: `${trip.date}T${trip.arrivalTime}`, ms: Date.now() - started, error: describeError(err) });
       }
-      remaining.push(trip);
-    } catch {
-      remaining.push(trip);
     }
+  } finally {
+    // Re-read so a trip queued while this sync ran is not overwritten
+    const remaining = getPendingTrips().filter((t) => !sent.has(t.queuedAt));
+    localStorage.setItem('pendingTrips', JSON.stringify(remaining));
+    syncing = false;
+    updateSyncBadge();
   }
-
-  localStorage.setItem('pendingTrips', JSON.stringify(remaining));
-  updateSyncBadge();
 
   if (synced > 0) {
     showToast(`${synced} trip${synced > 1 ? 's' : ''} synced successfully`, 'success');
@@ -646,6 +719,12 @@ async function handleSubmit() {
       localStorage.setItem('lastDestination', payload.destination);
     }
 
+    const queued = offlineMsg.startsWith('📡');
+    $('#doneTitle').textContent = queued ? 'Trip Saved on Phone' : 'Trip Logged!';
+    $('#doneSubtitle').textContent = queued
+      ? 'Not in the spreadsheet yet — it will be sent automatically.'
+      : 'Your driving data has been saved to the spreadsheet.';
+
     goToScreen(2);
   };
 
@@ -657,54 +736,56 @@ async function handleSubmit() {
     return;
   }
 
-  try {
-    // Retried because Apps Script fails ~24% of requests on Google's side, not
-    // ours. This is only SAFE because the server now recognises a repeat by
-    // date + arrival time: before that guard existed, a retry after a reply was
-    // lost in transit is exactly what produced the duplicate rows in the sheet.
-    let response, lastErr;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        response = await fetch(CONFIG.SCRIPT_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify(payload)
-        });
-        if (!response.ok) throw new Error(`Server error: ${response.status}`);
-        lastErr = null;
-        break;
-      } catch (err) {
-        lastErr = err;
-        // Offline is not a transport hiccup — stop and let the queue handle it
-        if (!navigator.onLine) break;
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 800));
+  const tripKey = `${payload.date}T${payload.arrivalTime}`;
+  logEvent('submit-start', { trip: tripKey });
+
+  // Retried because Apps Script fails ~24% of requests on Google's side, not
+  // ours. This is only SAFE because the server recognises a repeat by
+  // date + arrival time. A timeout or lost connection is NOT retried here: the
+  // row may already have landed, and a second 25s wait is what made the app
+  // look frozen. Those go to the send-later queue instead.
+  const failures = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const id = newRequestId();
+    const started = Date.now();
+    try {
+      const { result, serverMs } = await postToScript({ ...payload, requestId: id });
+      if (result.error) throw Object.assign(new Error(result.error), { fromServer: true });
+      if (!isSubmitReply(result)) throw new Error('Unexpected server reply (nothing was written)');
+      logEvent('submit-ok', { id, attempt, ms: Date.now() - started, serverMs, duplicate: Boolean(result.duplicate) });
+
+      // Surface a suppressed duplicate rather than pretending a row was written.
+      // A false positive is possible for back-dated photos whose arrival time has
+      // no seconds, so it must not be silent.
+      showSuccess(result.duplicate ? '✓ Already logged — no duplicate row added' : '');
+      setButtonLoading(submitBtn, submitSpinner, false);
+      return;
+    } catch (err) {
+      const ms = Date.now() - started;
+      const error = describeError(err);
+      logEvent('submit-fail', { id, attempt, ms, error });
+      failures.push(`Try ${attempt} (request ${id}): ${error} after ${(ms / 1000).toFixed(1)}s`);
+
+      if (!navigator.onLine || isConnectionError(err)) {
+        savePendingTrip(payload);
+        logEvent('submit-queued', { trip: tripKey });
+        showSuccess('📡 Saved on phone — will sync automatically');
+        setButtonLoading(submitBtn, submitSpinner, false);
+        // Try again shortly in the background rather than waiting for next open
+        setTimeout(() => navigator.onLine && syncPendingTrips(), 30000);
+        return;
       }
+      // A refusal from the script itself will not change on a second try
+      if (err.fromServer) break;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 800));
     }
-    if (lastErr) throw lastErr;
-
-    const result = await response.json();
-
-    if (result.error) throw new Error(result.error);
-
-    // Surface a suppressed duplicate rather than pretending a row was written.
-    // A false positive is possible for back-dated photos whose arrival time has
-    // no seconds, so it must not be silent.
-    if (result.duplicate) {
-      showSuccess('✓ Already logged — no duplicate row added');
-    } else {
-      showSuccess();
-    }
-  } catch (err) {
-    // Network error — save offline
-    if (!navigator.onLine || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-      savePendingTrip(payload);
-      showSuccess('📡 Saved offline — will sync when connected');
-    } else {
-      showToast('Submit failed: ' + err.message, 'error');
-    }
-  } finally {
-    setButtonLoading(submitBtn, submitSpinner, false);
   }
+
+  setButtonLoading(submitBtn, submitSpinner, false);
+  showErrorReport(
+    new Error(`${failures.join('\n')}\n\nTrip ${tripKey} may not have been saved. Check the sheet before submitting again.`),
+    '⚠ Submit Failed'
+  );
 }
 
 // ===== NEW TRIP =====
@@ -782,7 +863,10 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-function showErrorReport(error) {
+function showErrorReport(error, title) {
+  errorReportTitle.textContent = title;
+  errorReportCopy.classList.remove('hidden');
+  errorReportClear.classList.add('hidden');
   let html = '';
 
   if (error.report) {
@@ -829,12 +913,45 @@ function showErrorReport(error) {
     // Fallback: no structured report, show raw message
     html += `<div class="error-section">`;
     html += `<div class="error-label">Error</div>`;
-    html += `<div class="error-value">${escapeHtml(error.message)}</div>`;
+    html += `<pre class="error-raw diary-text">${escapeHtml(error.message)}</pre>`;
     html += `</div>`;
   }
 
   errorReportBody.innerHTML = html;
   errorReportOverlay.classList.remove('hidden');
+}
+
+function showDiagnostics() {
+  errorReportTitle.textContent = `Diagnostics · ${APP_VERSION}`;
+  errorReportCopy.classList.remove('hidden');
+  errorReportClear.classList.remove('hidden');
+  errorReportBody.innerHTML = `
+    <div class="error-section">
+      <div class="error-label">Diary (newest last) · pending trips: ${getPendingTrips().length}</div>
+      <pre class="error-raw diary-text">${escapeHtml(getDiaryText())}</pre>
+    </div>`;
+  errorReportOverlay.classList.remove('hidden');
+  const pre = errorReportBody.querySelector('.diary-text');
+  pre.scrollTop = pre.scrollHeight;
+}
+
+async function copyReportText() {
+  // Error panels get the diary appended, so one paste carries the whole story
+  const isDiagnostics = !errorReportClear.classList.contains('hidden');
+  const text = isDiagnostics
+    ? `Drive Log ${APP_VERSION} diagnostics
+${getDiaryText()}`
+    : `Drive Log ${APP_VERSION} — ${errorReportTitle.textContent}
+${errorReportBody.innerText}
+
+--- diary ---
+${getDiaryText()}`;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Copied — paste it to your AI helper', 'success');
+  } catch {
+    showToast('Copy blocked — select the text and copy manually', 'error');
+  }
 }
 
 // ===== TOAST =====
