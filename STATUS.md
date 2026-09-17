@@ -45,12 +45,15 @@ Not yet checked live: `serverMs`, the log line, and the 50-row duplicate check (
 Tap 🩺 → Copy details → paste to the AI helper. Matching request ids appear on the Apps Script
 Executions page (kept ≈ a week).
 
-**State now** · v1.3.0 built and tested locally; not committed or deployed.
-**Next action** · `clasp push && clasp redeploy <live id> -d "v1.3.0 timing + queued dup check"`,
-then commit + push to GitHub Pages; fully close and reopen the home-screen app.
-**Waiting on / open questions** · Owner's go-ahead to deploy. After a week or two of use, read the
-diary for a pattern (e.g. slow first request after multi-day gaps). Done screen still says "saved to
-the spreadsheet" even when queued (older wording, not changed).
+Done screen now says "Trip Saved on Phone — not in the spreadsheet yet" when a trip is queued.
+
+**State now** · App v1.3.0 committed (`db1b339`) and live on GitHub Pages. **Google script NOT yet
+redeployed** — clasp is not installed on this laptop (it was set up on another machine). The new
+app works with the old script; only `serverMs` and the queued 50-row duplicate check are missing.
+**Next action** · Redeploy `Code.gs` (clasp from the other machine, or install clasp here, or paste
+into the Apps Script editor and edit the existing deployment to a new version — keep the same URL).
+**Waiting on / open questions** · Owner's choice of redeploy route. After a week or two of use, read
+the diary for a pattern (e.g. slow first request after multi-day gaps).
 
 ---
 
